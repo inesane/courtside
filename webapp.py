@@ -1835,7 +1835,8 @@ def find_open_port(start: int = 5050, end: int = 5100) -> int:
 
 
 def main():
-    port = find_open_port()
+    import os
+    port = int(os.environ.get("PORT", 0)) or find_open_port()
     start_monitor()
     print(f"\n  Open http://localhost:{port} to configure notifications\n")
     print("  Monitor started automatically — watching for games.\n")

@@ -10,8 +10,15 @@
           "category": "averages",
           "current_record_holder": "Robert Parish",
           "record_value": 1611,
-          "alert_within": 10,
           "description": "all-time games played record"
+        },
+        {
+          "stat": "PTS",
+          "stat_label": "points",
+          "category": "totals",
+          "current_record_holder": "45,000 milestone",
+          "record_value": 45000,
+          "description": "45,000 career points milestone"
         },
         {
           "stat": "AST",
@@ -19,7 +26,6 @@
           "category": "totals",
           "current_record_holder": "Jason Kidd",
           "record_value": 12091,
-          "alert_within": 200,
           "description": "3rd place on all-time assists list"
         },
         {
@@ -28,7 +34,6 @@
           "category": "totals",
           "current_record_holder": "Chris Paul",
           "record_value": 12499,
-          "alert_within": 700,
           "description": "2nd place on all-time assists list"
         },
         {
@@ -37,17 +42,55 @@
           "category": "totals",
           "current_record_holder": "Tim Duncan",
           "record_value": 15091,
-          "alert_within": 500,
           "description": "6th place on all-time rebounds list"
         },
         {
-          "stat": "PTS",
-          "stat_label": "points",
+          "stat": "STL",
+          "stat_label": "steals",
           "category": "totals",
-          "current_record_holder": "45,000 milestone",
-          "record_value": 45000,
-          "alert_within": 2000,
-          "description": "45,000 career points milestone"
+          "current_record_holder": "Gary Payton",
+          "record_value": 2445,
+          "description": "4th place on all-time steals list"
+        },
+        {
+          "stat": "STL",
+          "stat_label": "steals",
+          "category": "totals",
+          "current_record_holder": "Michael Jordan",
+          "record_value": 2514,
+          "description": "3rd place on all-time steals list"
+        },
+        {
+          "stat": "STL",
+          "stat_label": "steals",
+          "category": "totals",
+          "current_record_holder": "Jason Kidd",
+          "record_value": 2684,
+          "description": "2nd place on all-time steals list"
+        },
+        {
+          "stat": "3PT",
+          "stat_label": "three-pointers",
+          "category": "totals",
+          "current_record_holder": "Klay Thompson",
+          "record_value": 2729,
+          "description": "5th place on all-time three-pointers list"
+        },
+        {
+          "stat": "3PT",
+          "stat_label": "three-pointers",
+          "category": "totals",
+          "current_record_holder": "Ray Allen",
+          "record_value": 2973,
+          "description": "3rd place on all-time three-pointers list"
+        },
+        {
+          "stat": "FT",
+          "stat_label": "free throws",
+          "category": "totals",
+          "current_record_holder": "Karl Malone",
+          "record_value": 9787,
+          "description": "all-time free throws made record"
         }
       ]
     }

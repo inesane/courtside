@@ -44,7 +44,10 @@ async def fetch_career_stats(espn_id: str) -> dict[str, Any]:
                     try:
                         stats[key] = int(val_str.split("-")[0])
                     except ValueError:
-                        stats[key] = val_str
+                        try:
+                            stats[key] = float(val_str.split("-")[0])
+                        except ValueError:
+                            stats[key] = val_str
                 else:
                     try:
                         stats[key] = int(val_str)
@@ -57,11 +60,22 @@ async def fetch_career_stats(espn_id: str) -> dict[str, Any]:
     return stats
 
 
+def _get_per_game_avg(player_stats: dict[str, Any], stat: str) -> float | None:
+    """Get per-game average for a stat from the averages category."""
+    # GP is always 1 per game
+    if stat == "GP":
+        return 1.0
+    val = player_stats.get(f"averages:{stat}")
+    if isinstance(val, (int, float)):
+        return float(val)
+    return None
+
+
 def check_milestones(
     player_stats: dict[str, Any],
     player_config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Check which milestones are approaching or achieved."""
+    """Check which milestones could be broken next game."""
     alerts: list[dict[str, Any]] = []
     player_name = player_config["name"]
 
@@ -78,7 +92,6 @@ def check_milestones(
 
         current_val = int(current_val)
         record = milestone["record_value"]
-        alert_within = milestone["alert_within"]
         remaining = record - current_val
 
         if remaining <= 0:
@@ -95,7 +108,15 @@ def check_milestones(
                 "detail": f"{player_name} now has {current_val:,} career {milestone['stat_label']} (record was {record:,})",
                 "priority": "high",
             })
-        elif remaining <= alert_within:
+            continue
+
+        # Only alert if the record could realistically be broken next game
+        avg = _get_per_game_avg(player_stats, milestone["stat"])
+        if avg is None or avg <= 0:
+            continue
+
+        # Alert if remaining is within 1.5x the per-game average (a good game could do it)
+        if remaining <= avg * 1.5:
             alerts.append({
                 "player": player_name,
                 "stat": milestone["stat_label"],
@@ -104,9 +125,9 @@ def check_milestones(
                 "record_value": record,
                 "remaining": remaining,
                 "description": milestone["description"],
-                "headline": f"MILESTONE WATCH: {player_name} is {remaining:,} {milestone['stat_label']} away from {milestone['current_record_holder']}",
-                "detail": f"{player_name} has {current_val:,} career {milestone['stat_label']} — needs {remaining:,} more to pass {milestone['current_record_holder']} ({record:,}) for {milestone['description']}",
-                "priority": "high" if remaining <= alert_within // 3 else "medium",
+                "headline": f"MILESTONE ALERT: {player_name} needs just {remaining:,} {milestone['stat_label']} to pass {milestone['current_record_holder']}!",
+                "detail": f"{player_name} has {current_val:,} career {milestone['stat_label']} — needs {remaining:,} more to pass {milestone['current_record_holder']} ({record:,}) for {milestone['description']}. Could break it next game (averages {avg:.1f}/game).",
+                "priority": "high",
             })
 
     return alerts

@@ -48,11 +48,16 @@ All thresholds are configurable in the web UI.
 
 Tracks career milestones for players approaching all-time records. Checks once per day after all games go final and alerts when a player is closing in on a milestone.
 
+Uses per-game averages from ESPN to determine if a record could realistically be broken in the next game — no spam, only alerts when it matters.
+
 Currently tracking **LeBron James**:
 - Games played (Robert Parish's record)
-- All-time assists rankings (Jason Kidd, Chris Paul)
-- All-time rebounds rankings (Tim Duncan)
-- 45,000 career points milestone
+- Points (45,000 career milestone)
+- Assists (Jason Kidd, Chris Paul)
+- Rebounds (Tim Duncan)
+- Steals (Gary Payton, Michael Jordan, Jason Kidd)
+- Three-pointers (Klay Thompson, Ray Allen)
+- Free throws (Karl Malone's record)
 
 Player milestones are defined in `milestones.json`. To track additional players, add their ESPN ID and the milestones you want to watch.
 
