@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+.env
+.venv/
+venv/
+env/
+
+*.log
+.DS_Store
+Thumbs.db
+
+# Config contains webhook URLs / tokens — don't commit secrets
+config.yaml

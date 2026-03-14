@@ -1,0 +1,46 @@
+polling_interval_seconds: 30
+
+# Empty list = all teams. Add team abbreviations to filter.
+# e.g., ["LAL", "BOS", "GSW"]
+teams_filter: []
+
+alerts:
+  close_game:
+    enabled: true
+    point_threshold: 5
+    minutes_remaining: 4.0
+    quarters: [4, 5, 6, 7]
+
+  historic_scoring:
+    enabled: true
+    thresholds:
+      - period: 2
+        points: 40
+      - period: 3
+        points: 50
+
+  historic_stats:
+    enabled: true
+
+  blowout_comeback:
+    enabled: false
+    deficit_threshold: 20
+    close_threshold: 5
+
+  overtime:
+    enabled: true
+
+notifications:
+  webapp:
+    enabled: true
+  console:
+    enabled: true
+  desktop:
+    enabled: false
+  discord:
+    enabled: false
+    webhook_url: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
