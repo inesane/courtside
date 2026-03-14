@@ -31,6 +31,7 @@ from notifications.console import ConsoleNotifier
 from notifications.desktop import DesktopNotifier
 from notifications.discord import DiscordNotifier
 from notifications.telegram import TelegramNotifier
+from alerts.milestones import run_milestone_check
 from sports.espn import ESPNClient
 from sports.nba.provider import NBAProvider
 
@@ -56,6 +57,7 @@ monitor_running = False
 monitor_status: dict[str, Any] = {"state": "stopped", "last_poll": None, "games": {}}
 games_data: list[dict[str, Any]] = []
 games_lock = threading.Lock()
+_milestones_checked_today: str = ""  # date string to track once-per-day check
 
 NBA_TEAMS = [
     ("ATL", "Atlanta Hawks"),
@@ -146,7 +148,7 @@ def build_rules(config: dict, engine: AlertEngine) -> list[AlertRule]:
 
     cfg = get_alert_config(config, "historic_scoring")
     if cfg.get("enabled", True):
-        rules.append(HistoricScoringRule(thresholds=cfg.get("thresholds")))
+        rules.append(HistoricScoringRule(points_threshold=cfg.get("points_threshold", 50)))
 
     cfg = get_alert_config(config, "historic_stats")
     if cfg.get("enabled", True):
@@ -271,6 +273,8 @@ async def _poll_loop() -> None:
 
                 _broadcast_status({**monitor_status, "_games": serialized})
 
+                webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
+
                 for game in live:
                     if teams_filter and not (
                         game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
@@ -281,8 +285,6 @@ async def _poll_loop() -> None:
                         await provider.enrich_box_score(game)
                     except Exception:
                         logger.warning("Box score fetch failed for %s", game.game_id)
-
-                    webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
 
                     fired = engine.evaluate(game)
                     for a in fired:
@@ -312,6 +314,48 @@ async def _poll_loop() -> None:
                     ):
                         continue
                     engine.evaluate(game)
+
+                # GOAT Tracker: check milestones once per day after games finish
+                global _milestones_checked_today
+                goat_enabled = config.get("alerts", {}).get("goat_tracker", {}).get("enabled", True)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+
+                if goat_enabled and final and not live and _milestones_checked_today != today_str:
+                    _milestones_checked_today = today_str
+                    logger.info("Running GOAT Tracker milestone check...")
+                    try:
+                        milestone_alerts = await run_milestone_check()
+                        for ma in milestone_alerts:
+                            alert_dict = {
+                                "_type": "alert",
+                                "id": len(alert_history),
+                                "rule": "goat_tracker",
+                                "headline": ma["headline"],
+                                "detail": ma["detail"],
+                                "priority": ma["priority"],
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                            }
+                            if webapp_enabled:
+                                with alert_lock:
+                                    alert_history.append(alert_dict)
+                                _broadcast_alert(alert_dict)
+
+                            # Send through external notifiers too
+                            alert_obj = Alert(
+                                rule_name="goat_tracker",
+                                game_id="milestone",
+                                headline=ma["headline"],
+                                detail=ma["detail"],
+                                priority=ma["priority"],
+                                dedup_key=("milestone", ma["stat"], ma["record_holder"]),
+                            )
+                            for n in notifiers:
+                                try:
+                                    await n.send(alert_obj)
+                                except Exception:
+                                    logger.warning("Notifier %s failed for milestone", type(n).__name__)
+                    except Exception:
+                        logger.exception("GOAT Tracker check failed")
 
                 # Smart sleep based on game state
                 secs_until = _seconds_until_first_game(games)
@@ -1205,14 +1249,11 @@ TEMPLATE = """
                 <div class="alert-row">
                     <div class="alert-info">
                         <div class="alert-name">Historic Scoring</div>
-                        <div class="alert-desc">Player on pace for a massive scoring game</div>
+                        <div class="alert-desc">Player hits a massive point total at any point in the game</div>
                         <div class="settings-row" id="scoring-settings">
-                            <label>By halftime &ge;</label>
-                            <input type="number" name="scoring_halftime" min="20" max="60"
-                                value="{{ scoring_halftime }}">
-                            <label>By 3rd Q &ge;</label>
-                            <input type="number" name="scoring_third" min="30" max="80"
-                                value="{{ scoring_third }}">
+                            <label>Points &ge;</label>
+                            <input type="number" name="scoring_points" min="30" max="80"
+                                value="{{ alerts_cfg.historic_scoring.get('points_threshold', 50) }}">
                             <span>pts</span>
                         </div>
                     </div>
@@ -1255,6 +1296,18 @@ TEMPLATE = """
                     <label class="toggle">
                         <input type="checkbox" name="overtime_enabled"
                             {{ 'checked' if alerts_cfg.overtime.get('enabled', true) }}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="alert-row">
+                    <div class="alert-info">
+                        <div class="alert-name">GOAT Tracker</div>
+                        <div class="alert-desc">Track LeBron's career milestones (records, all-time rankings)</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" name="goat_tracker_enabled"
+                            {{ 'checked' if alerts_cfg.get('goat_tracker', {}).get('enabled', true) }}>
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -1607,14 +1660,6 @@ TEMPLATE = """
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-def _get_scoring_threshold(alerts_cfg: dict, period: int, default: int) -> int:
-    thresholds = alerts_cfg.get("historic_scoring", {}).get("thresholds", [])
-    for t in thresholds:
-        if t.get("period") == period:
-            return t.get("points", default)
-    return default
-
-
 @app.route("/")
 def index():
     config = load_config()
@@ -1642,8 +1687,6 @@ def index():
         selected_teams=selected_teams,
         alerts_cfg=alerts_cfg,
         notif=config.get("notifications", {}),
-        scoring_halftime=_get_scoring_threshold(alerts_cfg, 2, 40),
-        scoring_third=_get_scoring_threshold(alerts_cfg, 3, 50),
         saved=request.args.get("saved"),
         alerts=alerts_snapshot,
         alert_count=len(alerts_snapshot),
@@ -1673,10 +1716,7 @@ def save():
             },
             "historic_scoring": {
                 "enabled": "historic_scoring_enabled" in form,
-                "thresholds": [
-                    {"period": 2, "points": int(form.get("scoring_halftime", 40))},
-                    {"period": 3, "points": int(form.get("scoring_third", 50))},
-                ],
+                "points_threshold": int(form.get("scoring_points", 50)),
             },
             "historic_stats": {
                 "enabled": "historic_stats_enabled" in form,
@@ -1688,6 +1728,9 @@ def save():
             },
             "overtime": {
                 "enabled": "overtime_enabled" in form,
+            },
+            "goat_tracker": {
+                "enabled": "goat_tracker_enabled" in form,
             },
         },
         "notifications": {

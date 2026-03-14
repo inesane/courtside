@@ -13,11 +13,7 @@ alerts:
 
   historic_scoring:
     enabled: true
-    thresholds:
-      - period: 2
-        points: 40
-      - period: 3
-        points: 50
+    points_threshold: 50
 
   historic_stats:
     enabled: true
@@ -28,6 +24,9 @@ alerts:
     close_threshold: 5
 
   overtime:
+    enabled: true
+
+  goat_tracker:
     enabled: true
 
 notifications:

@@ -50,7 +50,7 @@ def build_rules(config: dict, engine: AlertEngine) -> list[AlertRule]:
     cfg = get_alert_config(config, "historic_scoring")
     if cfg.get("enabled", True):
         rules.append(HistoricScoringRule(
-            thresholds=cfg.get("thresholds"),
+            points_threshold=cfg.get("points_threshold", 50),
         ))
 
     cfg = get_alert_config(config, "historic_stats")

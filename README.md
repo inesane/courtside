@@ -6,6 +6,7 @@ Real-time sports notification system that alerts you when games get exciting —
 
 - **Live scoreboard** — see all today's games with real-time scores in the web UI
 - **Smart alerts** — get notified for close games, historic scoring, big stat lines, overtime
+- **GOAT Tracker** — track career milestones for all-time greats (e.g. LeBron approaching records)
 - **Multiple channels** — in-app bell, Discord, Telegram, desktop notifications, console
 - **Configurable** — toggle each alert type, set thresholds, filter by team
 - **Smart polling** — sleeps when no games are on, wakes up before tipoff, polls every 30s during live games
@@ -35,12 +36,25 @@ Open the URL shown in the terminal (e.g., `http://localhost:5050`) to:
 | Alert | What it detects | Default threshold |
 |-------|----------------|-------------------|
 | Close Game | Tight score in the 4th quarter / OT | Within 5 pts, last 4 min |
-| Historic Scoring | Player on a massive scoring pace | 40+ pts by halftime, 50+ by Q3 |
-| Historic Stats | Huge rebounding, assist, steal, or block numbers | 15+ reb, 12+ ast, 6+ stl/blk |
+| Historic Scoring | Player hits a massive point total | 50+ pts |
+| Historic Stats | Huge rebounding, assist, steal, or block numbers | 25+ reb, 18+ ast, 7+ stl, 8+ blk |
 | Blowout Comeback | Team erasing a big deficit | Was down 20+, now within 5 |
 | Overtime | Game goes to OT | Any OT |
+| GOAT Tracker | Career milestones approaching or broken | Configurable per-milestone |
 
 All thresholds are configurable in the web UI.
+
+## GOAT Tracker
+
+Tracks career milestones for players approaching all-time records. Checks once per day after all games go final and alerts when a player is closing in on a milestone.
+
+Currently tracking **LeBron James**:
+- Games played (Robert Parish's record)
+- All-time assists rankings (Jason Kidd, Chris Paul)
+- All-time rebounds rankings (Tim Duncan)
+- 45,000 career points milestone
+
+Player milestones are defined in `milestones.json`. To track additional players, add their ESPN ID and the milestones you want to watch.
 
 ## Notification Channels
 
@@ -76,8 +90,10 @@ The monitor minimizes API calls based on game state:
 ├── alerts/
 │   ├── base.py            # Alert, AlertRule
 │   ├── engine.py          # Alert engine with deduplication
+│   ├── milestones.py      # GOAT Tracker milestone checker
 │   └── nba/
 │       └── rules.py       # NBA-specific alert rules
+├── milestones.json        # Player milestone definitions
 └── notifications/
     ├── base.py            # Notifier base class
     ├── console.py         # Terminal output

@@ -1,0 +1,55 @@
+{
+  "players": [
+    {
+      "name": "LeBron James",
+      "espn_id": "1966",
+      "milestones": [
+        {
+          "stat": "GP",
+          "stat_label": "games played",
+          "category": "averages",
+          "current_record_holder": "Robert Parish",
+          "record_value": 1611,
+          "alert_within": 10,
+          "description": "all-time games played record"
+        },
+        {
+          "stat": "AST",
+          "stat_label": "assists",
+          "category": "totals",
+          "current_record_holder": "Jason Kidd",
+          "record_value": 12091,
+          "alert_within": 200,
+          "description": "3rd place on all-time assists list"
+        },
+        {
+          "stat": "AST",
+          "stat_label": "assists",
+          "category": "totals",
+          "current_record_holder": "Chris Paul",
+          "record_value": 12499,
+          "alert_within": 700,
+          "description": "2nd place on all-time assists list"
+        },
+        {
+          "stat": "REB",
+          "stat_label": "rebounds",
+          "category": "totals",
+          "current_record_holder": "Tim Duncan",
+          "record_value": 15091,
+          "alert_within": 500,
+          "description": "6th place on all-time rebounds list"
+        },
+        {
+          "stat": "PTS",
+          "stat_label": "points",
+          "category": "totals",
+          "current_record_holder": "45,000 milestone",
+          "record_value": 45000,
+          "alert_within": 2000,
+          "description": "45,000 career points milestone"
+        }
+      ]
+    }
+  ]
+}

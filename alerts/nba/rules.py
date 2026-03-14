@@ -53,11 +53,8 @@ class HistoricScoringRule(AlertRule):
 
     name = "historic_scoring"
 
-    def __init__(self, thresholds: list[dict[str, int]] | None = None) -> None:
-        self.thresholds = thresholds or [
-            {"period": 2, "points": 40},
-            {"period": 3, "points": 50},
-        ]
+    def __init__(self, points_threshold: int = 50) -> None:
+        self.points_threshold = points_threshold
 
     def evaluate(self, game: GameState, prev_game: Optional[GameState]) -> list[Alert]:
         if game.status != "in_progress":
@@ -69,17 +66,15 @@ class HistoricScoringRule(AlertRule):
             if pts is None:
                 continue
 
-            for threshold in self.thresholds:
-                if game.period >= threshold["period"] and pts >= threshold["points"]:
-                    priority = "high" if pts >= 50 else "medium"
-                    alerts.append(Alert(
-                        rule_name=self.name,
-                        game_id=game.game_id,
-                        headline=f"HISTORIC SCORING: {player.player_name} has {pts} PTS",
-                        detail=f"{game.score_line()} | {game.detail} — {player.player_name} ({player.team}) is on fire!",
-                        priority=priority,
-                        dedup_key=(game.game_id, self.name, player.player_name, threshold["points"]),
-                    ))
+            if pts >= self.points_threshold:
+                alerts.append(Alert(
+                    rule_name=self.name,
+                    game_id=game.game_id,
+                    headline=f"HISTORIC SCORING: {player.player_name} has {pts} PTS",
+                    detail=f"{game.score_line()} | {game.detail} — {player.player_name} ({player.team}) is on fire!",
+                    priority="high",
+                    dedup_key=(game.game_id, self.name, player.player_name, self.points_threshold),
+                ))
 
         return alerts
 
@@ -89,14 +84,12 @@ class HistoricStatLineRule(AlertRule):
 
     name = "historic_stats"
 
-    # Default thresholds: (stat_name, display_label, threshold, min_period)
+    # Default thresholds: (stat_name, display_label, threshold)
     STAT_THRESHOLDS = [
-        ("reb", "REB", 15, 3),
-        ("ast", "AST", 12, 3),
-        ("stl", "STL", 6, 3),
-        ("blk", "BLK", 6, 3),
-        ("reb", "REB", 20, 4),
-        ("ast", "AST", 15, 4),
+        ("reb", "REB", 25),
+        ("ast", "AST", 18),
+        ("stl", "STL", 7),
+        ("blk", "BLK", 8),
     ]
 
     def evaluate(self, game: GameState, prev_game: Optional[GameState]) -> list[Alert]:
@@ -105,10 +98,7 @@ class HistoricStatLineRule(AlertRule):
 
         alerts: list[Alert] = []
         for player in game.players:
-            for stat_key, label, threshold, min_period in self.STAT_THRESHOLDS:
-                if game.period < min_period:
-                    continue
-
+            for stat_key, label, threshold in self.STAT_THRESHOLDS:
                 val = _get_stat(player.stats, stat_key, stat_key + "ounds" if stat_key == "reb" else stat_key + "ists" if stat_key == "ast" else stat_key)
                 if val is None:
                     continue
@@ -119,7 +109,7 @@ class HistoricStatLineRule(AlertRule):
                         game_id=game.game_id,
                         headline=f"HISTORIC STAT LINE: {player.player_name} has {val} {label}",
                         detail=f"{game.score_line()} | {game.detail} — {player.player_name} ({player.team})",
-                        priority="high" if val >= threshold * 1.3 else "medium",
+                        priority="high",
                         dedup_key=(game.game_id, self.name, player.player_name, label, threshold),
                     ))
 
