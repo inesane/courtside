@@ -1,6 +1,6 @@
 # Courtside
 
-Real-time sports notification system that alerts you when games get exciting — close finishes, historic performances, overtime, and more. Currently supports the NBA with a plugin architecture for adding other leagues.
+Missed Bam's 83? Real-time sports notification system that alerts you when games get exciting — close finishes, historic performances, overtime, and more. Currently supports the NBA with a plugin architecture for adding other leagues.
 
 ## Features
 
