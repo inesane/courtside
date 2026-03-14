@@ -8,7 +8,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -218,9 +218,25 @@ def _seconds_until_first_game(games) -> float | None:
     return earliest
 
 
+def _local_game_time(iso_str: str) -> str | None:
+    """Convert ESPN ISO timestamp to local time string like '7:00 PM'."""
+    try:
+        cleaned = iso_str.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(cleaned)
+        dt_local = dt_utc.astimezone()  # converts to system local timezone
+        return dt_local.strftime("%-I:%M %p %Z")
+    except (ValueError, AttributeError):
+        return None
+
+
 def _serialize_games(games) -> list[dict[str, Any]]:
     serialized = []
     for g in games:
+        detail = g.detail
+        if g.status == "scheduled" and g.start_time:
+            local_time = _local_game_time(g.start_time)
+            if local_time:
+                detail = local_time
         serialized.append({
             "game_id": g.game_id,
             "status": g.status,
@@ -232,7 +248,7 @@ def _serialize_games(games) -> list[dict[str, Any]]:
             "away_score": g.away_score,
             "period": g.period,
             "clock": g.clock,
-            "detail": g.detail,
+            "detail": detail,
         })
     return serialized
 
