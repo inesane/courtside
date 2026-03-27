@@ -1,33 +1,75 @@
 polling_interval_seconds: 30
 
-# Empty list = all teams. Add team abbreviations to filter.
-# e.g., ["LAL", "BOS", "GSW"]
-teams_filter: []
-
-alerts:
-  close_game:
+sports:
+  nba:
     enabled: true
-    point_threshold: 5
-    minutes_remaining: 4.0
-    quarters: [4, 5, 6, 7]
+    teams_filter: []  # Empty = all teams. e.g., ["LAL", "BOS", "GSW"]
+    alerts:
+      close_game:
+        enabled: true
+        point_threshold: 5
+        minutes_remaining: 4.0
+        quarters: [4, 5, 6, 7]
+      historic_scoring:
+        enabled: true
+        points_threshold: 50
+      historic_stats:
+        enabled: true
+      blowout_comeback:
+        enabled: false
+        deficit_threshold: 20
+        close_threshold: 5
+      overtime:
+        enabled: true
+      goat_tracker:
+        enabled: true
 
-  historic_scoring:
-    enabled: true
-    points_threshold: 50
-
-  historic_stats:
-    enabled: true
-
-  blowout_comeback:
+  ncaab:
     enabled: false
-    deficit_threshold: 20
-    close_threshold: 5
+    teams_filter: []
+    alerts:
+      close_game:
+        enabled: true
+      upset_alert:
+        enabled: true
+        seed_difference: 5
+      historic_scoring:
+        enabled: true
+        points_threshold: 40
+      overtime:
+        enabled: true
 
-  overtime:
-    enabled: true
+  nfl:
+    enabled: false
+    teams_filter: []
+    alerts:
+      close_game:
+        enabled: true
+        point_threshold: 7
+      high_scoring_qb:
+        enabled: true
+      big_rushing_game:
+        enabled: true
+      overtime:
+        enabled: true
 
-  goat_tracker:
-    enabled: true
+  soccer:
+    enabled: false
+    leagues: ["eng.1"]  # eng.1, uefa.champions, esp.1, usa.1
+    teams_filter: []
+    alerts:
+      late_goal:
+        enabled: true
+      equalizer:
+        enabled: true
+      comeback:
+        enabled: true
+      red_card:
+        enabled: true
+      extra_time:
+        enabled: true
+
+tracked_players: []
 
 notifications:
   webapp:

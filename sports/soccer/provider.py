@@ -8,23 +8,13 @@ from sports.espn import ESPNClient
 
 logger = logging.getLogger(__name__)
 
-# Mapping of ESPN stat header names to our keys
-STAT_KEYS = [
-    "minutes", "field_goals_made", "field_goals_attempted",
-    "three_pointers_made", "three_pointers_attempted",
-    "free_throws_made", "free_throws_attempted",
-    "offensive_rebounds", "defensive_rebounds", "rebounds",
-    "assists", "steals", "blocks", "turnovers", "personal_fouls",
-    "plus_minus", "points",
-]
 
+class SoccerProvider(SportProvider):
+    sport = "soccer"
 
-class NBAProvider(SportProvider):
-    sport = "basketball"
-    league = "nba"
-
-    def __init__(self, client: ESPNClient) -> None:
+    def __init__(self, client: ESPNClient, league: str = "eng.1") -> None:
         self.client = client
+        self.league = league
 
     async def get_games(self) -> list[GameState]:
         data = await self.client.get_scoreboard(self.sport, self.league)
@@ -42,6 +32,8 @@ class NBAProvider(SportProvider):
     async def enrich_box_score(self, game: GameState) -> GameState:
         data = await self.client.get_summary(self.sport, self.league, game.game_id)
         game.players = self._parse_box_score(data)
+        # Parse goal events for hat trick / equalizer detection
+        game._goal_events = self._parse_goal_events(data)
         return game
 
     def _parse_event(self, event: dict[str, Any]) -> GameState:
@@ -62,14 +54,15 @@ class NBAProvider(SportProvider):
         else:
             game_status = "scheduled"
 
+        # Soccer clock: ESPN provides the minute in displayClock
         return GameState(
             game_id=event["id"],
-            sport_key="nba",
+            sport_key=f"soccer_{self.league}",
             status=game_status,
             home_team=home["team"]["displayName"],
             away_team=away["team"]["displayName"],
-            home_abbrev=home["team"]["abbreviation"],
-            away_abbrev=away["team"]["abbreviation"],
+            home_abbrev=home["team"].get("abbreviation", home["team"]["shortDisplayName"]),
+            away_abbrev=away["team"].get("abbreviation", away["team"]["shortDisplayName"]),
             home_score=int(home.get("score", 0)),
             away_score=int(away.get("score", 0)),
             period=status.get("period", 0),
@@ -81,12 +74,12 @@ class NBAProvider(SportProvider):
     def _parse_box_score(self, data: dict[str, Any]) -> list[PlayerStats]:
         players: list[PlayerStats] = []
 
+        # Soccer box scores are structured differently
         for team_data in data.get("boxscore", {}).get("players", []):
             team_name = team_data["team"]["displayName"]
 
             for stat_group in team_data.get("statistics", []):
-                # Get the header labels to map stat positions
-                labels = [l.lower() for l in stat_group.get("labels", [])]
+                labels = [label.lower() for label in stat_group.get("labels", [])]
 
                 for athlete in stat_group.get("athletes", []):
                     name = athlete["athlete"]["displayName"]
@@ -97,21 +90,16 @@ class NBAProvider(SportProvider):
                     for i, val in enumerate(raw_stats):
                         if i < len(labels):
                             key = labels[i]
-                        elif i < len(STAT_KEYS):
-                            key = STAT_KEYS[i]
                         else:
                             continue
 
-                        # Parse numeric values
                         try:
-                            if "-" in str(val) and key != "plus_minus":
-                                # Format like "5-10" for made-attempted
-                                parts = val.split("-")
-                                stats[key] = int(parts[0])
-                            else:
-                                stats[key] = int(val)
+                            stats[key] = int(val)
                         except (ValueError, TypeError):
-                            stats[key] = val
+                            try:
+                                stats[key] = float(val)
+                            except (ValueError, TypeError):
+                                stats[key] = val
 
                     players.append(PlayerStats(
                         player_name=name,
@@ -121,3 +109,18 @@ class NBAProvider(SportProvider):
                     ))
 
         return players
+
+    def _parse_goal_events(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Parse goal events from the summary for hat trick / late goal detection."""
+        goals: list[dict[str, Any]] = []
+
+        # ESPN includes key events / scoring plays
+        for play in data.get("scoringPlays", []):
+            goals.append({
+                "minute": play.get("clock", {}).get("displayValue", ""),
+                "team": play.get("team", {}).get("displayName", ""),
+                "player": play.get("text", ""),
+                "period": play.get("period", {}).get("number", 0),
+            })
+
+        return goals

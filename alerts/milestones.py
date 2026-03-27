@@ -12,7 +12,26 @@ import httpx
 logger = logging.getLogger(__name__)
 
 MILESTONES_PATH = Path("milestones.json")
+ALERTED_PATH = Path(".milestones_alerted.json")
 ESPN_STATS_URL = "https://site.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{id}/stats"
+
+
+def _load_alerted() -> set[str]:
+    """Load set of milestone keys that have already been alerted."""
+    if ALERTED_PATH.exists():
+        with open(ALERTED_PATH) as f:
+            return set(json.load(f))
+    return set()
+
+
+def _save_alerted(alerted: set[str]) -> None:
+    with open(ALERTED_PATH, "w") as f:
+        json.dump(sorted(alerted), f)
+
+
+def _milestone_key(player_name: str, milestone: dict) -> str:
+    """Unique key for a milestone to track if it's been alerted."""
+    return f"{player_name}:{milestone['stat']}:{milestone['record_value']}"
 
 
 def load_milestones() -> dict[str, Any]:
@@ -75,11 +94,19 @@ def check_milestones(
     player_stats: dict[str, Any],
     player_config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Check which milestones could be broken next game."""
+    """Check which milestones could be broken next game. Skips already-alerted ones."""
     alerts: list[dict[str, Any]] = []
     player_name = player_config["name"]
+    alerted = _load_alerted()
+    newly_alerted = False
 
     for milestone in player_config.get("milestones", []):
+        mkey = _milestone_key(player_name, milestone)
+
+        # Skip milestones we've already notified about
+        if mkey in alerted:
+            continue
+
         stat_key = f"{milestone['category']}:{milestone['stat']}"
         current_val = player_stats.get(stat_key)
 
@@ -95,7 +122,7 @@ def check_milestones(
         remaining = record - current_val
 
         if remaining <= 0:
-            # Already passed the record
+            # Record broken — alert once then mark as done
             alerts.append({
                 "player": player_name,
                 "stat": milestone["stat_label"],
@@ -108,6 +135,8 @@ def check_milestones(
                 "detail": f"{player_name} now has {current_val:,} career {milestone['stat_label']} (record was {record:,})",
                 "priority": "high",
             })
+            alerted.add(mkey)
+            newly_alerted = True
             continue
 
         # Only alert if the record could realistically be broken next game
@@ -129,6 +158,11 @@ def check_milestones(
                 "detail": f"{player_name} has {current_val:,} career {milestone['stat_label']} — needs {remaining:,} more to pass {milestone['current_record_holder']} ({record:,}) for {milestone['description']}. Could break it next game (averages {avg:.1f}/game).",
                 "priority": "high",
             })
+            alerted.add(mkey)
+            newly_alerted = True
+
+    if newly_alerted:
+        _save_alerted(alerted)
 
     return alerts
 

@@ -18,22 +18,19 @@ from flask import Flask, Response, jsonify, redirect, render_template_string, re
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
-from alerts.nba.rules import (
-    BlowoutComebackRule,
-    CloseGameRule,
-    HistoricScoringRule,
-    HistoricStatLineRule,
-    OvertimeRule,
-)
-from config import get_alert_config
+from alerts.milestones import run_milestone_check
+from alerts.player_tracking import PlayerTrackingRule
 from notifications.base import Notifier
 from notifications.console import ConsoleNotifier
 from notifications.desktop import DesktopNotifier
 from notifications.discord import DiscordNotifier
 from notifications.telegram import TelegramNotifier
-from alerts.milestones import run_milestone_check
 from sports.espn import ESPNClient
 from sports.nba.provider import NBAProvider
+from sports.ncaab.provider import NCAABProvider
+from sports.nfl.provider import NFLProvider
+from sports.soccer.provider import SoccerProvider
+from sports.registry import SPORT_REGISTRY, get_enabled_sports, SOCCER_LEAGUES, SOCCER_TEAMS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,38 +56,37 @@ games_data: list[dict[str, Any]] = []
 games_lock = threading.Lock()
 _milestones_checked_today: str = ""  # date string to track once-per-day check
 
-NBA_TEAMS = [
-    ("ATL", "Atlanta Hawks"),
-    ("BOS", "Boston Celtics"),
-    ("BKN", "Brooklyn Nets"),
-    ("CHA", "Charlotte Hornets"),
-    ("CHI", "Chicago Bulls"),
-    ("CLE", "Cleveland Cavaliers"),
-    ("DAL", "Dallas Mavericks"),
-    ("DEN", "Denver Nuggets"),
-    ("DET", "Detroit Pistons"),
-    ("GS", "Golden State Warriors"),
-    ("HOU", "Houston Rockets"),
-    ("IND", "Indiana Pacers"),
-    ("LAC", "LA Clippers"),
-    ("LAL", "Los Angeles Lakers"),
-    ("MEM", "Memphis Grizzlies"),
-    ("MIA", "Miami Heat"),
-    ("MIL", "Milwaukee Bucks"),
-    ("MIN", "Minnesota Timberwolves"),
-    ("NO", "New Orleans Pelicans"),
-    ("NY", "New York Knicks"),
-    ("OKC", "Oklahoma City Thunder"),
-    ("ORL", "Orlando Magic"),
-    ("PHI", "Philadelphia 76ers"),
-    ("PHX", "Phoenix Suns"),
-    ("POR", "Portland Trail Blazers"),
-    ("SAC", "Sacramento Kings"),
-    ("SA", "San Antonio Spurs"),
-    ("TOR", "Toronto Raptors"),
-    ("UTAH", "Utah Jazz"),
-    ("WSH", "Washington Wizards"),
-]
+def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Migrate old flat config format to new per-sport structure."""
+    if "sports" in config:
+        return config  # Already migrated
+
+    # Convert old flat structure to new format
+    old_alerts = config.get("alerts", {})
+    new_config: dict[str, Any] = {
+        "polling_interval_seconds": config.get("polling_interval_seconds", 30),
+        "sports": {
+            "nba": {
+                "enabled": True,
+                "teams_filter": config.get("teams_filter", []),
+                "alerts": {
+                    "close_game": old_alerts.get("close_game", {"enabled": True}),
+                    "historic_scoring": old_alerts.get("historic_scoring", {"enabled": True}),
+                    "historic_stats": old_alerts.get("historic_stats", {"enabled": True}),
+                    "blowout_comeback": old_alerts.get("blowout_comeback", {"enabled": False}),
+                    "overtime": old_alerts.get("overtime", {"enabled": True}),
+                    "goat_tracker": old_alerts.get("goat_tracker", {"enabled": True}),
+                },
+            },
+            "ncaab": {"enabled": False, "teams_filter": [], "alerts": {}},
+            "nfl": {"enabled": False, "teams_filter": [], "alerts": {}},
+            "soccer": {"enabled": False, "leagues": ["eng.1"], "teams_filter": [], "alerts": {}},
+        },
+        "tracked_players": config.get("tracked_players", []),
+        "notifications": config.get("notifications", {}),
+    }
+    save_config(new_config)
+    return new_config
 
 
 # ---------------------------------------------------------------------------
@@ -135,38 +131,60 @@ def _broadcast_status(status: dict[str, Any]) -> None:
             sse_clients.remove(q)
 
 
-def build_rules(config: dict, engine: AlertEngine) -> list[AlertRule]:
-    rules: list[AlertRule] = []
+def _build_providers(config: dict[str, Any], espn: ESPNClient) -> dict[str, Any]:
+    """Build providers and engines for all enabled sports."""
+    providers: dict[str, Any] = {}
+    sports_cfg = config.get("sports", {})
 
-    cfg = get_alert_config(config, "close_game")
-    if cfg.get("enabled", True):
-        rules.append(CloseGameRule(
-            point_threshold=cfg.get("point_threshold", 5),
-            minutes_remaining=cfg.get("minutes_remaining", 4.0),
-            quarters=cfg.get("quarters", [4, 5, 6, 7]),
-        ))
+    for sport_key, sport_meta in SPORT_REGISTRY.items():
+        scfg = sports_cfg.get(sport_key, {})
+        if not scfg.get("enabled", False):
+            continue
 
-    cfg = get_alert_config(config, "historic_scoring")
-    if cfg.get("enabled", True):
-        rules.append(HistoricScoringRule(points_threshold=cfg.get("points_threshold", 50)))
+        if sport_key == "nba":
+            provider = NBAProvider(espn)
+        elif sport_key == "ncaab":
+            provider = NCAABProvider(espn)
+        elif sport_key == "nfl":
+            provider = NFLProvider(espn)
+        elif sport_key == "soccer":
+            leagues = scfg.get("leagues", ["eng.1"])
+            # Create a provider per league — we'll merge games
+            provider = [SoccerProvider(espn, league=lg) for lg in leagues]
+        else:
+            continue
 
-    cfg = get_alert_config(config, "historic_stats")
-    if cfg.get("enabled", True):
-        rules.append(HistoricStatLineRule())
+        engine = AlertEngine(rules=[])
+        alerts_cfg = scfg.get("alerts", {})
+        engine.rules = sport_meta.build_rules(alerts_cfg, engine)
 
-    cfg = get_alert_config(config, "blowout_comeback")
-    if cfg.get("enabled", True):
-        rules.append(BlowoutComebackRule(
-            deficit_threshold=cfg.get("deficit_threshold", 20),
-            close_threshold=cfg.get("close_threshold", 5),
-            engine=engine,
-        ))
+        # Add player tracking rule if any tracked players for this sport
+        tracked = config.get("tracked_players", [])
+        sport_tracked = [p for p in tracked if _player_matches_sport(p, sport_key)]
+        if sport_tracked:
+            engine.rules.append(PlayerTrackingRule(sport_tracked))
 
-    cfg = get_alert_config(config, "overtime")
-    if cfg.get("enabled", True):
-        rules.append(OvertimeRule())
+        providers[sport_key] = {
+            "provider": provider,
+            "engine": engine,
+            "teams_filter": set(scfg.get("teams_filter", [])),
+        }
 
-    return rules
+    return providers
+
+
+def _player_matches_sport(player: dict, sport_key: str) -> bool:
+    """Check if a tracked player belongs to a sport."""
+    league = player.get("league", "")
+    if sport_key == "nba" and league == "nba":
+        return True
+    if sport_key == "ncaab" and league == "mens-college-basketball":
+        return True
+    if sport_key == "nfl" and league == "nfl":
+        return True
+    if sport_key == "soccer" and player.get("sport") == "soccer":
+        return True
+    return False
 
 
 def build_notifiers(config: dict) -> list[Notifier]:
@@ -239,6 +257,7 @@ def _serialize_games(games) -> list[dict[str, Any]]:
                 detail = local_time
         serialized.append({
             "game_id": g.game_id,
+            "sport_key": g.sport_key,
             "status": g.status,
             "home_team": g.home_team,
             "away_team": g.away_team,
@@ -257,95 +276,129 @@ async def _poll_loop() -> None:
     global monitor_running, monitor_status
 
     config = load_config()
+    config = migrate_config(config)
     polling_interval = config.get("polling_interval_seconds", 30)
-    teams_filter = set(config.get("teams_filter", []))
 
     espn = ESPNClient()
-    provider = NBAProvider(espn)
-
-    engine = AlertEngine(rules=[])
-    engine.rules = build_rules(config, engine)
+    sport_providers = _build_providers(config, espn)
     notifiers = build_notifiers(config)
 
-    logger.info("Monitor started | rules=%s", [r.name for r in engine.rules])
+    enabled = list(sport_providers.keys())
+    logger.info("Monitor started | sports=%s", enabled)
 
     try:
         while monitor_running:
             try:
-                games = await provider.get_games()
-                live = [g for g in games if g.status == "in_progress"]
-                scheduled = [g for g in games if g.status == "scheduled"]
-                final = [g for g in games if g.status == "final"]
+                all_games: list = []
+                all_live: list = []
+                all_scheduled: list = []
+                all_final: list = []
 
+                # Poll all enabled sports
+                for sport_key, sp in sport_providers.items():
+                    provider = sp["provider"]
+                    engine = sp["engine"]
+                    teams_filter = sp["teams_filter"]
+
+                    # Handle soccer multi-league
+                    if isinstance(provider, list):
+                        games = []
+                        for p in provider:
+                            games.extend(await p.get_games())
+                    else:
+                        games = await provider.get_games()
+
+                    live = [g for g in games if g.status == "in_progress"]
+                    scheduled = [g for g in games if g.status == "scheduled"]
+                    final = [g for g in games if g.status == "final"]
+
+                    all_games.extend(games)
+                    all_live.extend(live)
+                    all_scheduled.extend(scheduled)
+                    all_final.extend(final)
+
+                    webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
+
+                    for game in live:
+                        if teams_filter and not (
+                            game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
+                        ):
+                            continue
+
+                        try:
+                            if isinstance(provider, list):
+                                # Find the right soccer provider for this game's league
+                                for p in provider:
+                                    if game.sport_key == f"soccer_{p.league}":
+                                        await p.enrich_box_score(game)
+                                        break
+                            else:
+                                await provider.enrich_box_score(game)
+                        except Exception:
+                            logger.warning("Box score fetch failed for %s", game.game_id)
+
+                        fired = engine.evaluate(game)
+                        for a in fired:
+                            alert_dict = {
+                                "_type": "alert",
+                                "id": len(alert_history),
+                                "rule": a.rule_name,
+                                "sport": sport_key,
+                                "headline": a.headline,
+                                "detail": a.detail,
+                                "priority": a.priority,
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                            }
+                            if webapp_enabled:
+                                with alert_lock:
+                                    alert_history.append(alert_dict)
+                                _broadcast_alert(alert_dict)
+
+                            for n in notifiers:
+                                try:
+                                    await n.send(a)
+                                except Exception:
+                                    logger.warning("Notifier %s failed", type(n).__name__)
+
+                    for game in final:
+                        if teams_filter and not (
+                            game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
+                        ):
+                            continue
+                        engine.evaluate(game)
+
+                # Update status
                 monitor_status["last_poll"] = datetime.now().strftime("%H:%M:%S")
                 monitor_status["games"] = {
-                    "live": len(live), "scheduled": len(scheduled), "final": len(final),
+                    "live": len(all_live), "scheduled": len(all_scheduled), "final": len(all_final),
                 }
 
-                serialized = _serialize_games(games)
+                serialized = _serialize_games(all_games)
                 with games_lock:
                     games_data.clear()
                     games_data.extend(serialized)
-
                 _broadcast_status({**monitor_status, "_games": serialized})
 
-                webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
-
-                for game in live:
-                    if teams_filter and not (
-                        game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
-                    ):
-                        continue
-
-                    try:
-                        await provider.enrich_box_score(game)
-                    except Exception:
-                        logger.warning("Box score fetch failed for %s", game.game_id)
-
-                    fired = engine.evaluate(game)
-                    for a in fired:
-                        alert_dict = {
-                            "_type": "alert",
-                            "id": len(alert_history),
-                            "rule": a.rule_name,
-                            "headline": a.headline,
-                            "detail": a.detail,
-                            "priority": a.priority,
-                            "time": datetime.now().strftime("%H:%M:%S"),
-                        }
-                        if webapp_enabled:
-                            with alert_lock:
-                                alert_history.append(alert_dict)
-                            _broadcast_alert(alert_dict)
-
-                        for n in notifiers:
-                            try:
-                                await n.send(a)
-                            except Exception:
-                                logger.warning("Notifier %s failed", type(n).__name__)
-
-                for game in final:
-                    if teams_filter and not (
-                        game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
-                    ):
-                        continue
-                    engine.evaluate(game)
-
-                # GOAT Tracker: check milestones once per day after games finish
+                # GOAT Tracker: check milestones once per day after NBA games finish
                 global _milestones_checked_today
-                goat_enabled = config.get("alerts", {}).get("goat_tracker", {}).get("enabled", True)
+                nba_cfg = config.get("sports", {}).get("nba", {}).get("alerts", {})
+                goat_enabled = nba_cfg.get("goat_tracker", {}).get("enabled", True)
                 today_str = datetime.now().strftime("%Y-%m-%d")
+                nba_live = [g for g in all_live if g.sport_key == "nba"]
+                nba_final = [g for g in all_final if g.sport_key == "nba"]
 
-                if goat_enabled and final and not live and _milestones_checked_today != today_str:
+                if goat_enabled and nba_final and not nba_live and _milestones_checked_today != today_str:
                     _milestones_checked_today = today_str
                     logger.info("Running GOAT Tracker milestone check...")
                     try:
                         milestone_alerts = await run_milestone_check()
+                        webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
                         for ma in milestone_alerts:
                             alert_dict = {
                                 "_type": "alert",
                                 "id": len(alert_history),
                                 "rule": "goat_tracker",
+                                "sport": "nba",
                                 "headline": ma["headline"],
                                 "detail": ma["detail"],
                                 "priority": ma["priority"],
@@ -356,7 +409,6 @@ async def _poll_loop() -> None:
                                     alert_history.append(alert_dict)
                                 _broadcast_alert(alert_dict)
 
-                            # Send through external notifiers too
                             alert_obj = Alert(
                                 rule_name="goat_tracker",
                                 game_id="milestone",
@@ -374,13 +426,11 @@ async def _poll_loop() -> None:
                         logger.exception("GOAT Tracker check failed")
 
                 # Smart sleep based on game state
-                secs_until = _seconds_until_first_game(games)
+                secs_until = _seconds_until_first_game(all_games)
 
-                if live:
-                    # Games are live — use normal fast polling
+                if all_live:
                     sleep_secs = polling_interval
                 elif secs_until is not None and secs_until > 0:
-                    # Games scheduled but not started — sleep until 5 min before tipoff
                     wait = max(0, secs_until - 300)
                     if wait > polling_interval:
                         mins = int(wait // 60)
@@ -392,10 +442,8 @@ async def _poll_loop() -> None:
                         _broadcast_status(monitor_status)
                         sleep_secs = wait
                     else:
-                        # Close to tipoff, poll normally
                         sleep_secs = polling_interval
                 else:
-                    # All games final or no games today — check back every 30 min
                     idle_interval = 1800
                     logger.info("No upcoming games. Checking again in 30 minutes.")
                     monitor_status["state"] = "idle (no upcoming games)"
@@ -447,7 +495,7 @@ TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sports Notifications</title>
+    <title>Courtside</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1101,6 +1149,131 @@ TEMPLATE = """
             background: #21262d;
             margin: 6px 0;
         }
+
+        /* Sport tabs */
+        .sport-tabs {
+            display: flex;
+            gap: 4px;
+            padding: 8px 24px;
+            background: #0d1117;
+            border-bottom: 1px solid #21262d;
+            overflow-x: auto;
+        }
+
+        .sport-tab {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            background: none;
+            border: 1px solid transparent;
+            color: #8b949e;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+
+        .sport-tab:hover { background: #161b22; color: #e1e4e8; }
+        .sport-tab.active { background: #161b22; color: #fff; border-color: #30363d; }
+        .sport-tab .tab-icon { margin-right: 4px; }
+
+        .sport-panel { display: none; }
+        .sport-panel.active { display: block; }
+
+        /* Player tracking */
+        .player-search-box {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .player-search-input {
+            flex: 1;
+            padding: 10px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #e1e4e8;
+            font-size: 14px;
+        }
+
+        .player-search-btn {
+            padding: 10px 16px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #e1e4e8;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .player-search-btn:hover { background: #30363d; }
+
+        .player-results {
+            margin-bottom: 16px;
+        }
+
+        .player-result-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            border: 1px solid #21262d;
+            border-radius: 8px;
+            margin-bottom: 6px;
+            background: #0d1117;
+        }
+
+        .player-result-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .player-result-name { font-size: 14px; font-weight: 600; }
+        .player-result-team { font-size: 12px; color: #8b949e; }
+        .player-result-sport { font-size: 11px; color: #58a6ff; }
+
+        .player-track-btn {
+            padding: 6px 14px;
+            background: #238636;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .player-track-btn:hover { background: #2ea043; }
+
+        .tracked-player-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            margin-bottom: 6px;
+        }
+
+        .player-remove-btn {
+            padding: 4px 10px;
+            background: none;
+            border: 1px solid #da3633;
+            border-radius: 6px;
+            color: #da3633;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .player-remove-btn:hover { background: #da3633; color: #fff; }
+
+        .soccer-leagues-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -1163,261 +1336,431 @@ TEMPLATE = """
         </div>
     </div>
 
+    <!-- Sport Tabs -->
+    <div class="sport-tabs">
+        {% for st in sport_tabs %}
+        <button class="sport-tab {% if loop.first %}active{% endif %}" onclick="switchTab('{{ st.key }}')" id="tab-{{ st.key }}">
+            <span class="tab-icon">{{ st.icon|safe }}</span> {{ st.display_name }}
+        </button>
+        {% endfor %}
+        <button class="sport-tab" onclick="switchTab('players')" id="tab-players">
+            <span class="tab-icon">&#11088;</span> Player Tracker
+        </button>
+    </div>
+
     <!-- Main content -->
     <div class="container">
-        <p class="subtitle">Configure which games and events you want to be notified about.</p>
-
-        <!-- Live Scoreboard -->
-        <div class="scoreboard-section" id="scoreboard-section">
-            <h2><span class="icon">&#127941;</span> Today's Games</h2>
-            <div class="scoreboard-grid" id="scoreboard-grid">
-                {% if games_list %}
-                    {% for g in games_list %}
-                    <div class="game-card {{ 'live' if g.status == 'in_progress' else 'scheduled' if g.status == 'scheduled' else 'final' }}" data-game-id="{{ g.game_id }}">
-                        <div class="game-status-bar">
-                            {% if g.status == 'in_progress' %}
-                                <span class="game-status-tag live">Live</span>
-                                <span class="game-clock">{{ g.detail }}</span>
-                            {% elif g.status == 'scheduled' %}
-                                <span class="game-status-tag scheduled">Scheduled</span>
-                                <span class="game-clock">{{ g.detail }}</span>
-                            {% else %}
-                                <span class="game-status-tag final">Final</span>
-                                <span class="game-clock">{{ g.detail }}</span>
-                            {% endif %}
-                        </div>
-                        <div class="game-teams">
-                            <div class="game-team-row {{ 'winning' if g.away_score > g.home_score else 'losing' if g.away_score < g.home_score else '' }}">
-                                <div class="game-team-info">
-                                    <span class="game-team-abbrev">{{ g.away_abbrev }}</span>
-                                    <span class="game-team-name">{{ g.away_team }}</span>
-                                </div>
-                                <span class="game-team-score">{{ g.away_score if g.status != 'scheduled' else '' }}</span>
-                            </div>
-                            <div class="game-divider"></div>
-                            <div class="game-team-row {{ 'winning' if g.home_score > g.away_score else 'losing' if g.home_score < g.away_score else '' }}">
-                                <div class="game-team-info">
-                                    <span class="game-team-abbrev">{{ g.home_abbrev }}</span>
-                                    <span class="game-team-name">{{ g.home_team }}</span>
-                                </div>
-                                <span class="game-team-score">{{ g.home_score if g.status != 'scheduled' else '' }}</span>
-                            </div>
-                        </div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="scoreboard-empty">
-                        Start monitoring to see today's games
-                    </div>
-                {% endif %}
-            </div>
-        </div>
-
         <form method="POST" action="/save" id="config-form">
 
+        {% for st in sport_tabs %}
+        <div class="sport-panel {% if loop.first %}active{% endif %}" id="panel-{{ st.key }}">
+
+            <!-- Enable sport toggle -->
+            <div class="card">
+                <h2>{{ st.icon|safe }} {{ st.display_name }}
+                    <label class="toggle" style="margin-left: auto;">
+                        <input type="checkbox" name="{{ st.key }}_enabled" {{ 'checked' if st.enabled }}>
+                        <span class="slider"></span>
+                    </label>
+                </h2>
+
+                {% if st.key == 'soccer' %}
+                <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">Select leagues to monitor:</p>
+                <div class="soccer-leagues-grid">
+                    {% for lg_key, lg_name in soccer_leagues.items() %}
+                    <label class="team-item" style="padding: 6px 12px;">
+                        <input type="checkbox" name="soccer_leagues" value="{{ lg_key }}"
+                            {{ 'checked' if lg_key in st.leagues }}>
+                        <span class="name">{{ lg_name }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Scoreboard for this sport -->
+            <div class="scoreboard-section">
+                <h2>{{ st.icon|safe }} Today's Games</h2>
+                <div class="scoreboard-grid" id="scoreboard-{{ st.key }}">
+                    {% set ns = namespace(has_games=false) %}
+                    {% for g in games_list %}
+                        {% if g.sport_key is defined and g.sport_key == st.key or (st.key == 'soccer' and g.sport_key is defined and g.sport_key.startswith('soccer')) %}
+                        {% set ns.has_games = true %}
+                        <div class="game-card {{ 'live' if g.status == 'in_progress' else 'scheduled' if g.status == 'scheduled' else 'final' }}" data-game-id="{{ g.game_id }}">
+                            <div class="game-status-bar">
+                                {% if g.status == 'in_progress' %}
+                                    <span class="game-status-tag live">Live</span>
+                                {% elif g.status == 'scheduled' %}
+                                    <span class="game-status-tag scheduled">Scheduled</span>
+                                {% else %}
+                                    <span class="game-status-tag final">Final</span>
+                                {% endif %}
+                                <span class="game-clock">{{ g.detail }}</span>
+                            </div>
+                            <div class="game-teams">
+                                <div class="game-team-row {{ 'winning' if g.away_score > g.home_score else 'losing' if g.away_score < g.home_score else '' }}">
+                                    <div class="game-team-info">
+                                        <span class="game-team-abbrev">{{ g.away_abbrev }}</span>
+                                        <span class="game-team-name">{{ g.away_team }}</span>
+                                    </div>
+                                    <span class="game-team-score">{{ g.away_score if g.status != 'scheduled' else '' }}</span>
+                                </div>
+                                <div class="game-divider"></div>
+                                <div class="game-team-row {{ 'winning' if g.home_score > g.away_score else 'losing' if g.home_score < g.away_score else '' }}">
+                                    <div class="game-team-info">
+                                        <span class="game-team-abbrev">{{ g.home_abbrev }}</span>
+                                        <span class="game-team-name">{{ g.home_team }}</span>
+                                    </div>
+                                    <span class="game-team-score">{{ g.home_score if g.status != 'scheduled' else '' }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                    {% endfor %}
+                    {% if not ns.has_games %}
+                    <div class="scoreboard-empty">
+                        {% if st.enabled %}Start monitoring to see today's games{% else %}Enable {{ st.display_name }} to see games{% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if st.key == 'soccer' %}
+            <!-- Soccer Teams (filtered by selected leagues) -->
+            <div class="card">
+                <h2><span class="icon">{{ st.icon|safe }}</span> Teams</h2>
+                <div class="all-teams-toggle">
+                    <input type="checkbox" id="{{ st.key }}-all-teams" name="{{ st.key }}_all_teams"
+                        {{ 'checked' if not st.teams_filter }}
+                        onchange="toggleTeamGrid('{{ st.key }}')">
+                    <label for="{{ st.key }}-all-teams">Follow all teams</label>
+                </div>
+                <div class="team-grid" id="{{ st.key }}-team-grid">
+                    {% for lg_key in st.leagues %}
+                        {% if lg_key in soccer_teams %}
+                        <div style="grid-column: 1 / -1; font-size: 13px; color: #58a6ff; font-weight: 600; margin-top: 8px;">
+                            {{ soccer_leagues.get(lg_key, lg_key) }}
+                        </div>
+                        {% for abbrev, name in soccer_teams[lg_key] %}
+                        <label class="team-item">
+                            <input type="checkbox" name="{{ st.key }}_teams" value="{{ abbrev }}"
+                                {{ 'checked' if abbrev in st.teams_filter }}>
+                            <span class="abbrev">{{ abbrev }}</span>
+                            <span class="name">{{ name }}</span>
+                        </label>
+                        {% endfor %}
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            {% elif st.teams %}
             <!-- Teams -->
             <div class="card">
-                <h2><span class="icon">&#127936;</span> Teams</h2>
-
+                <h2><span class="icon">{{ st.icon|safe }}</span> Teams</h2>
                 <div class="all-teams-toggle">
-                    <input type="checkbox" id="all-teams" name="all_teams"
-                        {{ 'checked' if not config.get('teams_filter') }}>
-                    <label for="all-teams">Follow all teams</label>
+                    <input type="checkbox" id="{{ st.key }}-all-teams" name="{{ st.key }}_all_teams"
+                        {{ 'checked' if not st.teams_filter }}
+                        onchange="toggleTeamGrid('{{ st.key }}')">
+                    <label for="{{ st.key }}-all-teams">Follow all teams</label>
                 </div>
-
-                <div class="team-grid" id="team-grid">
-                    {% for abbrev, name in teams %}
+                <div class="team-grid" id="{{ st.key }}-team-grid">
+                    {% for abbrev, name in st.teams %}
                     <label class="team-item">
-                        <input type="checkbox" name="teams" value="{{ abbrev }}"
-                            {{ 'checked' if abbrev in selected_teams }}>
+                        <input type="checkbox" name="{{ st.key }}_teams" value="{{ abbrev }}"
+                            {{ 'checked' if abbrev in st.teams_filter }}>
                         <span class="abbrev">{{ abbrev }}</span>
                         <span class="name">{{ name }}</span>
                     </label>
                     {% endfor %}
                 </div>
             </div>
+            {% endif %}
 
-            <!-- Alerts -->
+            <!-- Sport-specific alerts -->
             <div class="card">
-                <h2><span class="icon">&#128276;</span> Notifications</h2>
+                <h2><span class="icon">&#128276;</span> {{ st.display_name }} Alerts</h2>
 
+                {% if st.key == 'nba' %}
                 <div class="alert-row">
                     <div class="alert-info">
                         <div class="alert-name">Close Games</div>
-                        <div class="alert-desc">Games within a few points near the end of the 4th quarter or overtime</div>
-                        <div class="settings-row" id="close-game-settings">
-                            <label>Point margin &le;</label>
-                            <input type="number" name="close_game_threshold" min="1" max="20"
-                                value="{{ alerts_cfg.close_game.get('point_threshold', 5) }}">
-                            <label>Time left &le;</label>
-                            <input type="number" name="close_game_minutes" min="1" max="12" step="0.5"
-                                value="{{ alerts_cfg.close_game.get('minutes_remaining', 4) }}">
+                        <div class="alert-desc">Games within a few points near the end of the 4th quarter or OT</div>
+                        <div class="settings-row">
+                            <label>Margin &le;</label>
+                            <input type="number" name="{{ st.key }}_close_game_threshold" min="1" max="20"
+                                value="{{ st.alerts_cfg.get('close_game', {}).get('point_threshold', 5) }}">
+                            <label>Time &le;</label>
+                            <input type="number" name="{{ st.key }}_close_game_minutes" min="1" max="12" step="0.5"
+                                value="{{ st.alerts_cfg.get('close_game', {}).get('minutes_remaining', 4) }}">
                             <span>min</span>
                         </div>
                     </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="close_game_enabled"
-                            {{ 'checked' if alerts_cfg.close_game.get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_close_game_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('close_game', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
-
                 <div class="alert-row">
                     <div class="alert-info">
                         <div class="alert-name">Historic Scoring</div>
-                        <div class="alert-desc">Player hits a massive point total at any point in the game</div>
-                        <div class="settings-row" id="scoring-settings">
+                        <div class="alert-desc">Player hits a massive point total</div>
+                        <div class="settings-row">
                             <label>Points &ge;</label>
-                            <input type="number" name="scoring_points" min="30" max="80"
-                                value="{{ alerts_cfg.historic_scoring.get('points_threshold', 50) }}">
-                            <span>pts</span>
+                            <input type="number" name="{{ st.key }}_scoring_points" min="30" max="80"
+                                value="{{ st.alerts_cfg.get('historic_scoring', {}).get('points_threshold', 50) }}">
                         </div>
                     </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="historic_scoring_enabled"
-                            {{ 'checked' if alerts_cfg.historic_scoring.get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_historic_scoring_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('historic_scoring', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Historic Stat Lines</div>
+                    <div class="alert-desc">Huge rebounds, assists, steals, or blocks</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_historic_stats_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('historic_stats', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Blowout Comebacks</div>
+                    <div class="alert-desc">Team erasing a big deficit</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_blowout_comeback_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('blowout_comeback', {}).get('enabled', false) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Overtime</div><div class="alert-desc">Games that go to OT</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_overtime_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('overtime', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">GOAT Tracker</div>
+                    <div class="alert-desc">Career milestone alerts (LeBron tracking)</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_goat_tracker_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('goat_tracker', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
 
+                {% elif st.key == 'ncaab' %}
                 <div class="alert-row">
-                    <div class="alert-info">
-                        <div class="alert-name">Historic Stat Lines</div>
-                        <div class="alert-desc">Players putting up huge numbers in rebounds, assists, steals, or blocks</div>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="historic_stats_enabled"
-                            {{ 'checked' if alerts_cfg.historic_stats.get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="alert-info"><div class="alert-name">Close Games</div>
+                    <div class="alert-desc">Tight games in the 2nd half or OT</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_close_game_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('close_game', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Upset Alert</div>
+                    <div class="alert-desc">Lower seed leading a higher seed late</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_upset_alert_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('upset_alert', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Historic Scoring</div>
+                    <div class="alert-desc">Player hits 40+ points</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_historic_scoring_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('historic_scoring', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Historic Stat Lines</div>
+                    <div class="alert-desc">Huge rebounds, assists, steals, or blocks</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_historic_stats_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('historic_stats', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Blowout Comebacks</div>
+                    <div class="alert-desc">Team erasing a big deficit</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_blowout_comeback_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('blowout_comeback', {}).get('enabled', false) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Overtime</div><div class="alert-desc">Games that go to OT</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_overtime_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('overtime', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
 
+                {% elif st.key == 'nfl' %}
                 <div class="alert-row">
-                    <div class="alert-info">
-                        <div class="alert-name">Blowout Comebacks</div>
-                        <div class="alert-desc">A team that was down big is making it a game again</div>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="blowout_comeback_enabled"
-                            {{ 'checked' if alerts_cfg.blowout_comeback.get('enabled', false) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="alert-info"><div class="alert-name">Close Games</div>
+                    <div class="alert-desc">Within one score in the 4th quarter</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_close_game_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('close_game', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">QB on Fire</div>
+                    <div class="alert-desc">Quarterback with 4+ TD passes or 400+ yards</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_high_scoring_qb_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('high_scoring_qb', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Rushing Explosion</div>
+                    <div class="alert-desc">Player with 150+ rushing yards or 3+ TDs</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_big_rushing_game_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('big_rushing_game', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Blowout Comebacks</div>
+                    <div class="alert-desc">Team erasing a 17+ point deficit</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_blowout_comeback_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('blowout_comeback', {}).get('enabled', false) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Overtime</div><div class="alert-desc">Games that go to OT</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_overtime_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('overtime', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
 
+                {% elif st.key == 'soccer' %}
                 <div class="alert-row">
-                    <div class="alert-info">
-                        <div class="alert-name">Overtime</div>
-                        <div class="alert-desc">Games that go to overtime</div>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="overtime_enabled"
-                            {{ 'checked' if alerts_cfg.overtime.get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="alert-info"><div class="alert-name">Late Goals</div>
+                    <div class="alert-desc">Goals scored in the 80th minute or later</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_late_goal_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('late_goal', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
-
                 <div class="alert-row">
-                    <div class="alert-info">
-                        <div class="alert-name">GOAT Tracker</div>
-                        <div class="alert-desc">Track LeBron's career milestones (records, all-time rankings)</div>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="goat_tracker_enabled"
-                            {{ 'checked' if alerts_cfg.get('goat_tracker', {}).get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="alert-info"><div class="alert-name">Equalizer</div>
+                    <div class="alert-desc">Team ties the match late (75th minute+)</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_equalizer_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('equalizer', {}).get('enabled', true) }}><span class="slider"></span></label>
                 </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Comeback</div>
+                    <div class="alert-desc">Team comes back from 2+ goals down</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_comeback_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('comeback', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Red Card</div>
+                    <div class="alert-desc">Player receives a red card</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_red_card_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('red_card', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                <div class="alert-row">
+                    <div class="alert-info"><div class="alert-name">Extra Time</div>
+                    <div class="alert-desc">Match goes to extra time</div></div>
+                    <label class="toggle"><input type="checkbox" name="{{ st.key }}_extra_time_enabled"
+                        {{ 'checked' if st.alerts_cfg.get('extra_time', {}).get('enabled', true) }}><span class="slider"></span></label>
+                </div>
+                {% endif %}
             </div>
+        </div>
+        {% endfor %}
 
-            <!-- Notification Channels -->
+        <!-- Player Tracker Panel -->
+        <div class="sport-panel" id="panel-players">
             <div class="card">
-                <h2><span class="icon">&#128228;</span> Channels</h2>
+                <h2><span class="icon">&#11088;</span> Track Players</h2>
+                <p style="font-size: 13px; color: #8b949e; margin-bottom: 16px;">
+                    Search for any player to get notified about their big moments during live games.
+                </p>
 
-                <div class="channel-row">
-                    <div class="channel-info">
-                        <span class="channel-name">In-App (Bell)</span>
-                        <span class="channel-desc">Notifications in the bell icon panel</span>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="webapp_enabled"
-                            {{ 'checked' if notif.get('webapp', {}).get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
+                <div class="player-search-box">
+                    <input type="text" class="player-search-input" id="player-search" placeholder="Search players (e.g. Luka Doncic, Haaland)..." autocomplete="off">
+                    <button type="button" class="player-search-btn" onclick="searchPlayers()">Search</button>
                 </div>
 
-                <div class="channel-row">
-                    <div class="channel-info">
-                        <span class="channel-name">Console</span>
-                        <span class="channel-desc">Print alerts to the terminal</span>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="console_enabled"
-                            {{ 'checked' if notif.get('console', {}).get('enabled', true) }}>
-                        <span class="slider"></span>
-                    </label>
-                </div>
+                <div class="player-results" id="player-results"></div>
 
-                <div class="channel-row">
-                    <div class="channel-info">
-                        <span class="channel-name">Desktop Notifications</span>
-                        <span class="channel-desc">OS-level push notifications</span>
+                <h3 style="font-size: 15px; color: #fff; margin: 20px 0 12px;">Tracked Players</h3>
+                <div id="tracked-players-list">
+                    {% for p in tracked_players %}
+                    <div class="tracked-player-item" id="tracked-{{ p.espn_id }}">
+                        <div class="player-result-info">
+                            <span class="player-result-name">{{ p.name }}</span>
+                            <span class="player-result-sport">{{ p.league | upper }}</span>
+                        </div>
+                        <button type="button" class="player-remove-btn" onclick="untrackPlayer('{{ p.espn_id }}')">Remove</button>
                     </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="desktop_enabled"
-                            {{ 'checked' if notif.get('desktop', {}).get('enabled', false) }}>
-                        <span class="slider"></span>
-                    </label>
-                </div>
-
-                <div class="channel-row" style="flex-wrap: wrap;">
-                    <div class="channel-info" style="flex: 1;">
-                        <span class="channel-name">Discord</span>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="discord_enabled" id="discord-toggle"
-                            {{ 'checked' if notif.get('discord', {}).get('enabled', false) }}>
-                        <span class="slider"></span>
-                    </label>
-                    <input type="text" class="webhook-input" name="discord_webhook"
-                        placeholder="Webhook URL"
-                        value="{{ notif.get('discord', {}).get('webhook_url', '') }}"
-                        id="discord-url"
-                        style="display: {{ 'block' if notif.get('discord', {}).get('enabled', false) else 'none' }};">
-                </div>
-
-                <div class="channel-row" style="flex-wrap: wrap;">
-                    <div class="channel-info" style="flex: 1;">
-                        <span class="channel-name">Telegram</span>
-                    </div>
-                    <label class="toggle">
-                        <input type="checkbox" name="telegram_enabled" id="telegram-toggle"
-                            {{ 'checked' if notif.get('telegram', {}).get('enabled', false) }}>
-                        <span class="slider"></span>
-                    </label>
-                    <div id="telegram-fields"
-                        style="display: {{ 'block' if notif.get('telegram', {}).get('enabled', false) else 'none' }}; width: 100%;">
-                        <input type="text" class="webhook-input" name="telegram_bot_token"
-                            placeholder="Bot token (from @BotFather)"
-                            value="{{ notif.get('telegram', {}).get('bot_token', '') }}"
-                            style="margin-bottom: 6px;">
-                        <input type="text" class="webhook-input" name="telegram_chat_id"
-                            placeholder="Chat ID"
-                            value="{{ notif.get('telegram', {}).get('chat_id', '') }}">
-                    </div>
+                    {% endfor %}
+                    {% if not tracked_players %}
+                    <p style="color: #484f58; font-size: 14px;" id="no-tracked-msg">No players tracked yet. Search above to add players.</p>
+                    {% endif %}
                 </div>
             </div>
+        </div>
 
-            <!-- Polling -->
-            <div class="card">
-                <h2><span class="icon">&#9201;</span> Polling Interval</h2>
-                <div class="polling-input">
-                    <input type="number" name="polling_interval" min="10" max="120"
-                        value="{{ config.get('polling_interval_seconds', 30) }}">
-                    <span>seconds</span>
+        <!-- Notification Channels (shared across all sports) -->
+        <div class="card">
+            <h2><span class="icon">&#128228;</span> Channels</h2>
+
+            <div class="channel-row">
+                <div class="channel-info">
+                    <span class="channel-name">In-App (Bell)</span>
+                    <span class="channel-desc">Notifications in the bell icon panel</span>
                 </div>
+                <label class="toggle">
+                    <input type="checkbox" name="webapp_enabled"
+                        {{ 'checked' if notif.get('webapp', {}).get('enabled', true) }}>
+                    <span class="slider"></span>
+                </label>
             </div>
 
-            <button type="submit" class="btn-save">Save Configuration</button>
+            <div class="channel-row">
+                <div class="channel-info">
+                    <span class="channel-name">Console</span>
+                    <span class="channel-desc">Print alerts to the terminal</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" name="console_enabled"
+                        {{ 'checked' if notif.get('console', {}).get('enabled', true) }}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="channel-row">
+                <div class="channel-info">
+                    <span class="channel-name">Desktop Notifications</span>
+                    <span class="channel-desc">OS-level push notifications</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" name="desktop_enabled"
+                        {{ 'checked' if notif.get('desktop', {}).get('enabled', false) }}>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="channel-row" style="flex-wrap: wrap;">
+                <div class="channel-info" style="flex: 1;">
+                    <span class="channel-name">Discord</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" name="discord_enabled" id="discord-toggle"
+                        {{ 'checked' if notif.get('discord', {}).get('enabled', false) }}>
+                    <span class="slider"></span>
+                </label>
+                <input type="text" class="webhook-input" name="discord_webhook"
+                    placeholder="Webhook URL"
+                    value="{{ notif.get('discord', {}).get('webhook_url', '') }}"
+                    id="discord-url"
+                    style="display: {{ 'block' if notif.get('discord', {}).get('enabled', false) else 'none' }};">
+            </div>
+
+            <div class="channel-row" style="flex-wrap: wrap;">
+                <div class="channel-info" style="flex: 1;">
+                    <span class="channel-name">Telegram</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" name="telegram_enabled" id="telegram-toggle"
+                        {{ 'checked' if notif.get('telegram', {}).get('enabled', false) }}>
+                    <span class="slider"></span>
+                </label>
+                <div id="telegram-fields"
+                    style="display: {{ 'block' if notif.get('telegram', {}).get('enabled', false) else 'none' }}; width: 100%;">
+                    <input type="text" class="webhook-input" name="telegram_bot_token"
+                        placeholder="Bot token (from @BotFather)"
+                        value="{{ notif.get('telegram', {}).get('bot_token', '') }}"
+                        style="margin-bottom: 6px;">
+                    <input type="text" class="webhook-input" name="telegram_chat_id"
+                        placeholder="Chat ID"
+                        value="{{ notif.get('telegram', {}).get('chat_id', '') }}">
+                </div>
+            </div>
+        </div>
+
+        <!-- Polling -->
+        <div class="card">
+            <h2><span class="icon">&#9201;</span> Polling Interval</h2>
+            <div class="polling-input">
+                <input type="number" name="polling_interval" min="10" max="120"
+                    value="{{ config.get('polling_interval_seconds', 30) }}">
+                <span>seconds</span>
+            </div>
+        </div>
+
+        <button type="submit" class="btn-save">Save Configuration</button>
         </form>
     </div>
 
@@ -1491,63 +1834,74 @@ TEMPLATE = """
         }
 
         // ---- Scoreboard ----
-        const scoreboardGrid = document.getElementById('scoreboard-grid');
-
         function updateScoreboard(games) {
-            // Sort: live first, then scheduled, then final
             const order = { 'in_progress': 0, 'scheduled': 1, 'final': 2 };
             games.sort((a, b) => (order[a.status] ?? 1) - (order[b.status] ?? 1));
 
-            scoreboardGrid.innerHTML = '';
-            if (!games.length) {
-                scoreboardGrid.innerHTML = '<div class="scoreboard-empty">No games today</div>';
-                return;
+            // Group games by sport
+            const bySport = {};
+            for (const g of games) {
+                const sk = (g.sport_key || '').startsWith('soccer') ? 'soccer' : (g.sport_key || 'nba');
+                if (!bySport[sk]) bySport[sk] = [];
+                bySport[sk].push(g);
             }
 
-            for (const g of games) {
-                const isLive = g.status === 'in_progress';
-                const isScheduled = g.status === 'scheduled';
-                const isFinal = g.status === 'final';
+            // Update each sport's scoreboard grid
+            for (const sportKey of ['nba', 'ncaab', 'nfl', 'soccer']) {
+                const grid = document.getElementById('scoreboard-' + sportKey);
+                if (!grid) continue;
 
-                const statusTag = isLive
-                    ? '<span class="game-status-tag live">Live</span>'
-                    : isScheduled
-                    ? '<span class="game-status-tag scheduled">Scheduled</span>'
-                    : '<span class="game-status-tag final">Final</span>';
+                const sportGames = bySport[sportKey] || [];
+                grid.innerHTML = '';
+                if (!sportGames.length) {
+                    grid.innerHTML = '<div class="scoreboard-empty">No games right now</div>';
+                    continue;
+                }
 
-                const awayWin = g.away_score > g.home_score;
-                const homeWin = g.home_score > g.away_score;
-                const awayClass = awayWin ? 'winning' : homeWin ? 'losing' : '';
-                const homeClass = homeWin ? 'winning' : awayWin ? 'losing' : '';
+                for (const g of sportGames) {
+                    const isLive = g.status === 'in_progress';
+                    const isScheduled = g.status === 'scheduled';
 
-                const card = document.createElement('div');
-                const statusClass = isLive ? 'live' : isScheduled ? 'scheduled' : 'final';
-                card.className = `game-card ${statusClass}`;
-                card.dataset.gameId = g.game_id;
-                card.innerHTML = `
-                    <div class="game-status-bar">
-                        ${statusTag}
-                        <span class="game-clock">${escapeHtml(g.detail)}</span>
-                    </div>
-                    <div class="game-teams">
-                        <div class="game-team-row ${awayClass}">
-                            <div class="game-team-info">
-                                <span class="game-team-abbrev">${escapeHtml(g.away_abbrev)}</span>
-                                <span class="game-team-name">${escapeHtml(g.away_team)}</span>
-                            </div>
-                            <span class="game-team-score">${isScheduled ? '' : g.away_score}</span>
+                    const statusTag = isLive
+                        ? '<span class="game-status-tag live">Live</span>'
+                        : isScheduled
+                        ? '<span class="game-status-tag scheduled">Scheduled</span>'
+                        : '<span class="game-status-tag final">Final</span>';
+
+                    const awayWin = g.away_score > g.home_score;
+                    const homeWin = g.home_score > g.away_score;
+                    const awayClass = awayWin ? 'winning' : homeWin ? 'losing' : '';
+                    const homeClass = homeWin ? 'winning' : awayWin ? 'losing' : '';
+
+                    const card = document.createElement('div');
+                    const statusClass = isLive ? 'live' : isScheduled ? 'scheduled' : 'final';
+                    card.className = `game-card ${statusClass}`;
+                    card.dataset.gameId = g.game_id;
+                    card.innerHTML = `
+                        <div class="game-status-bar">
+                            ${statusTag}
+                            <span class="game-clock">${escapeHtml(g.detail)}</span>
                         </div>
-                        <div class="game-divider"></div>
-                        <div class="game-team-row ${homeClass}">
-                            <div class="game-team-info">
-                                <span class="game-team-abbrev">${escapeHtml(g.home_abbrev)}</span>
-                                <span class="game-team-name">${escapeHtml(g.home_team)}</span>
+                        <div class="game-teams">
+                            <div class="game-team-row ${awayClass}">
+                                <div class="game-team-info">
+                                    <span class="game-team-abbrev">${escapeHtml(g.away_abbrev)}</span>
+                                    <span class="game-team-name">${escapeHtml(g.away_team)}</span>
+                                </div>
+                                <span class="game-team-score">${isScheduled ? '' : g.away_score}</span>
                             </div>
-                            <span class="game-team-score">${isScheduled ? '' : g.home_score}</span>
+                            <div class="game-divider"></div>
+                            <div class="game-team-row ${homeClass}">
+                                <div class="game-team-info">
+                                    <span class="game-team-abbrev">${escapeHtml(g.home_abbrev)}</span>
+                                    <span class="game-team-name">${escapeHtml(g.home_team)}</span>
+                                </div>
+                                <span class="game-team-score">${isScheduled ? '' : g.home_score}</span>
+                            </div>
                         </div>
-                    </div>
-                `;
-                scoreboardGrid.appendChild(card);
+                    `;
+                    grid.appendChild(card);
+                }
             }
         }
 
@@ -1625,18 +1979,29 @@ TEMPLATE = """
 
         connectSSE();
 
-        // ---- Existing toggles ----
-        const allTeamsCheckbox = document.getElementById('all-teams');
-        const teamGrid = document.getElementById('team-grid');
-
-        function updateTeamGrid() {
-            teamGrid.style.opacity = allTeamsCheckbox.checked ? '0.3' : '1';
-            teamGrid.style.pointerEvents = allTeamsCheckbox.checked ? 'none' : 'auto';
+        // ---- Sport tabs ----
+        function switchTab(key) {
+            document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.sport-panel').forEach(p => p.classList.remove('active'));
+            document.getElementById('tab-' + key).classList.add('active');
+            document.getElementById('panel-' + key).classList.add('active');
         }
 
-        allTeamsCheckbox.addEventListener('change', updateTeamGrid);
-        updateTeamGrid();
+        // ---- Team grid toggles ----
+        function toggleTeamGrid(sportKey) {
+            const cb = document.getElementById(sportKey + '-all-teams');
+            const grid = document.getElementById(sportKey + '-team-grid');
+            if (cb && grid) {
+                grid.style.opacity = cb.checked ? '0.3' : '1';
+                grid.style.pointerEvents = cb.checked ? 'none' : 'auto';
+            }
+        }
+        // Initialize all team grids
+        {% for st in sport_tabs %}
+        {% if st.teams %}toggleTeamGrid('{{ st.key }}');{% endif %}
+        {% endfor %}
 
+        // ---- Channel toggles ----
         const discordToggle = document.getElementById('discord-toggle');
         const discordUrl = document.getElementById('discord-url');
         discordToggle.addEventListener('change', () => {
@@ -1662,6 +2027,89 @@ TEMPLATE = """
             }
         });
 
+        // ---- Player tracking ----
+        const playerSearch = document.getElementById('player-search');
+        const playerResults = document.getElementById('player-results');
+        const trackedList = document.getElementById('tracked-players-list');
+
+        playerSearch.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); searchPlayers(); } });
+
+        function searchPlayers() {
+            const q = playerSearch.value.trim();
+            if (q.length < 2) return;
+
+            playerResults.innerHTML = '<p style="color: #8b949e;">Searching...</p>';
+
+            fetch('/api/players/search?q=' + encodeURIComponent(q))
+                .then(r => r.json())
+                .then(players => {
+                    playerResults.innerHTML = '';
+                    if (!players.length) {
+                        playerResults.innerHTML = '<p style="color: #484f58;">No players found</p>';
+                        return;
+                    }
+                    for (const p of players) {
+                        const div = document.createElement('div');
+                        div.className = 'player-result-item';
+                        div.innerHTML = `
+                            <div class="player-result-info">
+                                <span class="player-result-name">${escapeHtml(p.name)}</span>
+                                <span class="player-result-team">${escapeHtml(p.team)}</span>
+                                <span class="player-result-sport">${escapeHtml(p.league || p.sport || '')}</span>
+                            </div>
+                            <button type="button" class="player-track-btn" onclick='trackPlayer(${JSON.stringify(p).replace(/'/g, "&#39;")})'>Track</button>
+                        `;
+                        playerResults.appendChild(div);
+                    }
+                })
+                .catch(() => { playerResults.innerHTML = '<p style="color: #da3633;">Search failed</p>'; });
+        }
+
+        function trackPlayer(p) {
+            fetch('/api/players/track', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(p),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    const noMsg = document.getElementById('no-tracked-msg');
+                    if (noMsg) noMsg.remove();
+
+                    // Add to tracked list
+                    const div = document.createElement('div');
+                    div.className = 'tracked-player-item';
+                    div.id = 'tracked-' + p.espn_id;
+                    div.innerHTML = `
+                        <div class="player-result-info">
+                            <span class="player-result-name">${escapeHtml(p.name)}</span>
+                            <span class="player-result-sport">${escapeHtml((p.league || '').toUpperCase())}</span>
+                        </div>
+                        <button type="button" class="player-remove-btn" onclick="untrackPlayer('${p.espn_id}')">Remove</button>
+                    `;
+                    trackedList.appendChild(div);
+                    playerResults.innerHTML = '';
+                    playerSearch.value = '';
+                }
+            });
+        }
+
+        function untrackPlayer(espnId) {
+            fetch('/api/players/untrack', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ espn_id: espnId }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    const el = document.getElementById('tracked-' + espnId);
+                    if (el) el.remove();
+                }
+            });
+        }
+
         {% if saved %}
         const toast = document.getElementById('toast');
         toast.classList.add('show');
@@ -1679,12 +2127,23 @@ TEMPLATE = """
 @app.route("/")
 def index():
     config = load_config()
-    alerts_cfg = config.get("alerts", {})
-    for key in ("close_game", "historic_scoring", "historic_stats", "blowout_comeback", "overtime"):
-        if key not in alerts_cfg:
-            alerts_cfg[key] = {"enabled": key not in ("blowout_comeback",)}
+    config = migrate_config(config)
 
-    selected_teams = set(config.get("teams_filter", []))
+    sports_cfg = config.get("sports", {})
+    # Build per-sport context
+    sport_tabs = []
+    for key, meta in SPORT_REGISTRY.items():
+        scfg = sports_cfg.get(key, {})
+        sport_tabs.append({
+            "key": key,
+            "display_name": meta.display_name,
+            "icon": meta.icon,
+            "enabled": scfg.get("enabled", False),
+            "teams": meta.teams,
+            "teams_filter": set(scfg.get("teams_filter", [])),
+            "alerts_cfg": scfg.get("alerts", {}),
+            "leagues": scfg.get("leagues", []) if key == "soccer" else [],
+        })
 
     with alert_lock:
         alerts_snapshot = list(alert_history)
@@ -1692,16 +2151,17 @@ def index():
     with games_lock:
         games_snapshot = list(games_data)
 
-    # Sort: live first, then scheduled, then final
     status_order = {"in_progress": 0, "scheduled": 1, "final": 2}
     games_snapshot.sort(key=lambda g: status_order.get(g["status"], 1))
 
     return render_template_string(
         TEMPLATE,
         config=config,
-        teams=NBA_TEAMS,
-        selected_teams=selected_teams,
-        alerts_cfg=alerts_cfg,
+        sport_tabs=sport_tabs,
+        sport_registry=SPORT_REGISTRY,
+        soccer_leagues=SOCCER_LEAGUES,
+        soccer_teams=SOCCER_TEAMS,
+        tracked_players=config.get("tracked_players", []),
         notif=config.get("notifications", {}),
         saved=request.args.get("saved"),
         alerts=alerts_snapshot,
@@ -1717,38 +2177,77 @@ def index():
 def save():
     form = request.form
 
-    all_teams = "all_teams" in form
-    teams_filter = [] if all_teams else form.getlist("teams")
+    # Build per-sport config
+    sports = {}
+    for sport_key in SPORT_REGISTRY:
+        enabled = f"{sport_key}_enabled" in form
+        teams_key = f"{sport_key}_teams"
+        all_teams_key = f"{sport_key}_all_teams"
+        all_teams = all_teams_key in form
+        teams_filter = [] if all_teams else form.getlist(teams_key)
+
+        sport_alerts = {}
+        if sport_key == "nba":
+            sport_alerts = {
+                "close_game": {
+                    "enabled": f"{sport_key}_close_game_enabled" in form,
+                    "point_threshold": int(form.get(f"{sport_key}_close_game_threshold", 5)),
+                    "minutes_remaining": float(form.get(f"{sport_key}_close_game_minutes", 4)),
+                    "quarters": [4, 5, 6, 7],
+                },
+                "historic_scoring": {
+                    "enabled": f"{sport_key}_historic_scoring_enabled" in form,
+                    "points_threshold": int(form.get(f"{sport_key}_scoring_points", 50)),
+                },
+                "historic_stats": {"enabled": f"{sport_key}_historic_stats_enabled" in form},
+                "blowout_comeback": {"enabled": f"{sport_key}_blowout_comeback_enabled" in form, "deficit_threshold": 20, "close_threshold": 5},
+                "overtime": {"enabled": f"{sport_key}_overtime_enabled" in form},
+                "goat_tracker": {"enabled": f"{sport_key}_goat_tracker_enabled" in form},
+            }
+        elif sport_key == "ncaab":
+            sport_alerts = {
+                "close_game": {"enabled": f"{sport_key}_close_game_enabled" in form, "point_threshold": 5, "minutes_remaining": 4.0, "quarters": [2, 3, 4, 5]},
+                "historic_scoring": {"enabled": f"{sport_key}_historic_scoring_enabled" in form, "points_threshold": 40},
+                "historic_stats": {"enabled": f"{sport_key}_historic_stats_enabled" in form},
+                "upset_alert": {"enabled": f"{sport_key}_upset_alert_enabled" in form, "seed_difference": 5},
+                "blowout_comeback": {"enabled": f"{sport_key}_blowout_comeback_enabled" in form},
+                "overtime": {"enabled": f"{sport_key}_overtime_enabled" in form},
+            }
+        elif sport_key == "nfl":
+            sport_alerts = {
+                "close_game": {"enabled": f"{sport_key}_close_game_enabled" in form, "point_threshold": 7, "minutes_remaining": 4.0, "quarters": [4, 5, 6]},
+                "high_scoring_qb": {"enabled": f"{sport_key}_high_scoring_qb_enabled" in form},
+                "big_rushing_game": {"enabled": f"{sport_key}_big_rushing_game_enabled" in form},
+                "blowout_comeback": {"enabled": f"{sport_key}_blowout_comeback_enabled" in form},
+                "overtime": {"enabled": f"{sport_key}_overtime_enabled" in form},
+            }
+        elif sport_key == "soccer":
+            sport_alerts = {
+                "late_goal": {"enabled": f"{sport_key}_late_goal_enabled" in form},
+                "equalizer": {"enabled": f"{sport_key}_equalizer_enabled" in form},
+                "comeback": {"enabled": f"{sport_key}_comeback_enabled" in form},
+                "red_card": {"enabled": f"{sport_key}_red_card_enabled" in form},
+                "extra_time": {"enabled": f"{sport_key}_extra_time_enabled" in form},
+            }
+
+        sport_cfg = {
+            "enabled": enabled,
+            "teams_filter": teams_filter,
+            "alerts": sport_alerts,
+        }
+        if sport_key == "soccer":
+            sport_cfg["leagues"] = form.getlist("soccer_leagues") or ["eng.1"]
+
+        sports[sport_key] = sport_cfg
+
+    # Preserve tracked_players from existing config
+    existing = load_config()
+    existing = migrate_config(existing)
 
     config = {
         "polling_interval_seconds": max(10, int(form.get("polling_interval", 30))),
-        "teams_filter": teams_filter,
-        "alerts": {
-            "close_game": {
-                "enabled": "close_game_enabled" in form,
-                "point_threshold": int(form.get("close_game_threshold", 5)),
-                "minutes_remaining": float(form.get("close_game_minutes", 4)),
-                "quarters": [4, 5, 6, 7],
-            },
-            "historic_scoring": {
-                "enabled": "historic_scoring_enabled" in form,
-                "points_threshold": int(form.get("scoring_points", 50)),
-            },
-            "historic_stats": {
-                "enabled": "historic_stats_enabled" in form,
-            },
-            "blowout_comeback": {
-                "enabled": "blowout_comeback_enabled" in form,
-                "deficit_threshold": 20,
-                "close_threshold": 5,
-            },
-            "overtime": {
-                "enabled": "overtime_enabled" in form,
-            },
-            "goat_tracker": {
-                "enabled": "goat_tracker_enabled" in form,
-            },
-        },
+        "sports": sports,
+        "tracked_players": existing.get("tracked_players", []),
         "notifications": {
             "webapp": {"enabled": "webapp_enabled" in form},
             "console": {"enabled": "console_enabled" in form},
@@ -1767,7 +2266,6 @@ def save():
 
     save_config(config)
 
-    # Restart monitor if running so it picks up new config
     if monitor_running:
         stop_monitor()
         time.sleep(1)
@@ -1817,6 +2315,75 @@ def api_alert_stream():
 @app.route("/api/config")
 def api_config():
     return jsonify(load_config())
+
+
+@app.route("/api/players/search")
+def api_player_search():
+    query = request.args.get("q", "").strip()
+    if len(query) < 2:
+        return jsonify([])
+
+    import asyncio
+    async def _search():
+        espn = ESPNClient()
+        try:
+            return await espn.search_players(query, limit=10)
+        finally:
+            await espn.close()
+
+    results = asyncio.run(_search())
+    return jsonify(results)
+
+
+@app.route("/api/players/track", methods=["POST"])
+def api_track_player():
+    data = request.get_json()
+    if not data or not data.get("espn_id"):
+        return jsonify({"error": "espn_id required"}), 400
+
+    config = load_config()
+    config = migrate_config(config)
+    tracked = config.get("tracked_players", [])
+
+    # Don't add duplicates
+    if any(p["espn_id"] == data["espn_id"] for p in tracked):
+        return jsonify({"ok": True, "message": "already tracked"})
+
+    player_entry = {
+        "name": data.get("name", ""),
+        "espn_id": data["espn_id"],
+        "sport": data.get("sport", ""),
+        "league": data.get("league", ""),
+        "thresholds": data.get("thresholds", {}),
+        "milestones": [],
+    }
+    tracked.append(player_entry)
+    config["tracked_players"] = tracked
+    save_config(config)
+
+    return jsonify({"ok": True, "player": player_entry})
+
+
+@app.route("/api/players/untrack", methods=["POST"])
+def api_untrack_player():
+    data = request.get_json()
+    if not data or not data.get("espn_id"):
+        return jsonify({"error": "espn_id required"}), 400
+
+    config = load_config()
+    config = migrate_config(config)
+    tracked = config.get("tracked_players", [])
+    config["tracked_players"] = [p for p in tracked if p["espn_id"] != data["espn_id"]]
+    save_config(config)
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/players/tracked")
+def api_tracked_players():
+    config = load_config()
+    config = migrate_config(config)
+    return jsonify(config.get("tracked_players", []))
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ class GameState:
     period: int
     clock: str
     detail: str  # e.g., "4th 2:30"
+    sport_key: str = ""  # e.g., "nba", "ncaab", "nfl", "soccer_eng.1"
     start_time: str = ""  # ISO 8601 UTC, e.g. "2026-03-15T17:00Z"
     players: list[PlayerStats] = field(default_factory=list)
 
@@ -56,6 +57,7 @@ class PlayerStats:
 
     player_name: str
     team: str
+    espn_id: str = ""
     stats: dict[str, Any] = field(default_factory=dict)
 
 

@@ -8,7 +8,6 @@ from sports.espn import ESPNClient
 
 logger = logging.getLogger(__name__)
 
-# Mapping of ESPN stat header names to our keys
 STAT_KEYS = [
     "minutes", "field_goals_made", "field_goals_attempted",
     "three_pointers_made", "three_pointers_attempted",
@@ -19,9 +18,9 @@ STAT_KEYS = [
 ]
 
 
-class NBAProvider(SportProvider):
+class NCAABProvider(SportProvider):
     sport = "basketball"
-    league = "nba"
+    league = "mens-college-basketball"
 
     def __init__(self, client: ESPNClient) -> None:
         self.client = client
@@ -62,9 +61,13 @@ class NBAProvider(SportProvider):
         else:
             game_status = "scheduled"
 
-        return GameState(
+        # Parse seed if available (for March Madness upset detection)
+        home_seed = home.get("curatedRank", {}).get("current", 0)
+        away_seed = away.get("curatedRank", {}).get("current", 0)
+
+        game = GameState(
             game_id=event["id"],
-            sport_key="nba",
+            sport_key="ncaab",
             status=game_status,
             home_team=home["team"]["displayName"],
             away_team=away["team"]["displayName"],
@@ -77,6 +80,10 @@ class NBAProvider(SportProvider):
             detail=status["type"].get("shortDetail", ""),
             start_time=event.get("date", ""),
         )
+        # Store seeds in extra data for upset detection
+        game._home_seed = home_seed
+        game._away_seed = away_seed
+        return game
 
     def _parse_box_score(self, data: dict[str, Any]) -> list[PlayerStats]:
         players: list[PlayerStats] = []
@@ -85,8 +92,7 @@ class NBAProvider(SportProvider):
             team_name = team_data["team"]["displayName"]
 
             for stat_group in team_data.get("statistics", []):
-                # Get the header labels to map stat positions
-                labels = [l.lower() for l in stat_group.get("labels", [])]
+                labels = [label.lower() for label in stat_group.get("labels", [])]
 
                 for athlete in stat_group.get("athletes", []):
                     name = athlete["athlete"]["displayName"]
@@ -102,10 +108,8 @@ class NBAProvider(SportProvider):
                         else:
                             continue
 
-                        # Parse numeric values
                         try:
                             if "-" in str(val) and key != "plus_minus":
-                                # Format like "5-10" for made-attempted
                                 parts = val.split("-")
                                 stats[key] = int(parts[0])
                             else:

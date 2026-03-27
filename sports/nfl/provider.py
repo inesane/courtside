@@ -8,20 +8,10 @@ from sports.espn import ESPNClient
 
 logger = logging.getLogger(__name__)
 
-# Mapping of ESPN stat header names to our keys
-STAT_KEYS = [
-    "minutes", "field_goals_made", "field_goals_attempted",
-    "three_pointers_made", "three_pointers_attempted",
-    "free_throws_made", "free_throws_attempted",
-    "offensive_rebounds", "defensive_rebounds", "rebounds",
-    "assists", "steals", "blocks", "turnovers", "personal_fouls",
-    "plus_minus", "points",
-]
 
-
-class NBAProvider(SportProvider):
-    sport = "basketball"
-    league = "nba"
+class NFLProvider(SportProvider):
+    sport = "football"
+    league = "nfl"
 
     def __init__(self, client: ESPNClient) -> None:
         self.client = client
@@ -64,7 +54,7 @@ class NBAProvider(SportProvider):
 
         return GameState(
             game_id=event["id"],
-            sport_key="nba",
+            sport_key="nfl",
             status=game_status,
             home_team=home["team"]["displayName"],
             away_team=away["team"]["displayName"],
@@ -85,8 +75,8 @@ class NBAProvider(SportProvider):
             team_name = team_data["team"]["displayName"]
 
             for stat_group in team_data.get("statistics", []):
-                # Get the header labels to map stat positions
-                labels = [l.lower() for l in stat_group.get("labels", [])]
+                category = stat_group.get("name", "").lower()
+                labels = [label.lower() for label in stat_group.get("labels", [])]
 
                 for athlete in stat_group.get("athletes", []):
                     name = athlete["athlete"]["displayName"]
@@ -96,22 +86,25 @@ class NBAProvider(SportProvider):
                     stats: dict[str, Any] = {}
                     for i, val in enumerate(raw_stats):
                         if i < len(labels):
-                            key = labels[i]
-                        elif i < len(STAT_KEYS):
-                            key = STAT_KEYS[i]
+                            # Prefix with category to avoid collisions
+                            # (e.g., passing_yds vs rushing_yds)
+                            key = f"{category}_{labels[i]}" if category else labels[i]
                         else:
                             continue
 
-                        # Parse numeric values
                         try:
-                            if "-" in str(val) and key != "plus_minus":
-                                # Format like "5-10" for made-attempted
-                                parts = val.split("-")
+                            if "/" in str(val):
+                                # Format like "22/35" for completions/attempts
+                                parts = val.split("/")
                                 stats[key] = int(parts[0])
+                                stats[f"{key}_att"] = int(parts[1])
                             else:
                                 stats[key] = int(val)
                         except (ValueError, TypeError):
-                            stats[key] = val
+                            try:
+                                stats[key] = float(val)
+                            except (ValueError, TypeError):
+                                stats[key] = val
 
                     players.append(PlayerStats(
                         player_name=name,
