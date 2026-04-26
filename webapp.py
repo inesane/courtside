@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 import threading
 import time
 from datetime import datetime, timezone
@@ -13,8 +15,9 @@ from pathlib import Path
 from queue import Queue
 from typing import Any
 
-import yaml
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+
+from database import get_all_user_configs, get_or_create_user, init_db, load_user_config, save_user_config
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
@@ -43,7 +46,12 @@ logging.basicConfig(
 logger = logging.getLogger("webapp")
 
 app = Flask(__name__)
-CONFIG_PATH = Path("config.yaml")
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+
+
+@app.before_request
+def _ensure_user_session() -> None:
+    session["user_id"] = get_or_create_user(session.get("user_id"))
 
 # ---------------------------------------------------------------------------
 # Shared state for the background monitor
@@ -94,18 +102,19 @@ NBA_TEAMS = [
 
 
 # ---------------------------------------------------------------------------
-# Config helpers
+# Config helpers (thin wrappers so callers that pass a user_id work uniformly)
 # ---------------------------------------------------------------------------
-def load_config() -> dict[str, Any]:
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return yaml.safe_load(f) or {}
-    return {}
+def load_config(user_id: str | None = None) -> dict[str, Any]:
+    if user_id is None:
+        user_id = session.get("user_id", "")
+    return load_user_config(user_id) if user_id else {}
 
 
-def save_config(config: dict[str, Any]) -> None:
-    with open(CONFIG_PATH, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+def save_config(config: dict[str, Any], user_id: str | None = None) -> None:
+    if user_id is None:
+        user_id = session.get("user_id", "")
+    if user_id:
+        save_user_config(user_id, config)
 
 
 # ---------------------------------------------------------------------------
@@ -253,19 +262,32 @@ def _serialize_games(games) -> list[dict[str, Any]]:
     return serialized
 
 
+async def _notify_users(alert: Alert, home_abbrev: str, away_abbrev: str) -> None:
+    """Send alert to every user whose teams filter and notification config match."""
+    for uc in get_all_user_configs():
+        cfg = uc["config"]
+        user_filter = set(cfg.get("teams_filter", []))
+        if user_filter and home_abbrev and not (
+            home_abbrev in user_filter or away_abbrev in user_filter
+        ):
+            continue
+        for n in build_notifiers(cfg):
+            try:
+                await n.send(alert)
+            except Exception:
+                logger.warning("Notifier %s failed for user %s", type(n).__name__, uc["user_id"])
+
+
 async def _poll_loop() -> None:
     global monitor_running, monitor_status
 
-    config = load_config()
-    polling_interval = config.get("polling_interval_seconds", 30)
-    teams_filter = set(config.get("teams_filter", []))
+    polling_interval = 30  # fixed system default; users control notification routing
 
     espn = ESPNClient()
     provider = NBAProvider(espn)
 
     engine = AlertEngine(rules=[])
-    engine.rules = build_rules(config, engine)
-    notifiers = build_notifiers(config)
+    engine.rules = build_rules({}, engine)  # use rule defaults; thresholds per-user not yet applied
 
     logger.info("Monitor started | rules=%s", [r.name for r in engine.rules])
 
@@ -289,14 +311,7 @@ async def _poll_loop() -> None:
 
                 _broadcast_status({**monitor_status, "_games": serialized})
 
-                webapp_enabled = config.get("notifications", {}).get("webapp", {}).get("enabled", True)
-
                 for game in live:
-                    if teams_filter and not (
-                        game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
-                    ):
-                        continue
-
                     try:
                         await provider.enrich_box_score(game)
                     except Exception:
@@ -313,30 +328,25 @@ async def _poll_loop() -> None:
                             "priority": a.priority,
                             "time": datetime.now().strftime("%H:%M:%S"),
                         }
-                        if webapp_enabled:
-                            with alert_lock:
-                                alert_history.append(alert_dict)
-                            _broadcast_alert(alert_dict)
+                        with alert_lock:
+                            alert_history.append(alert_dict)
+                        _broadcast_alert(alert_dict)
 
-                        for n in notifiers:
-                            try:
-                                await n.send(a)
-                            except Exception:
-                                logger.warning("Notifier %s failed", type(n).__name__)
+                        await _notify_users(a, game.home_abbrev, game.away_abbrev)
 
                 for game in final:
-                    if teams_filter and not (
-                        game.home_abbrev in teams_filter or game.away_abbrev in teams_filter
-                    ):
-                        continue
                     engine.evaluate(game)
 
                 # GOAT Tracker: check milestones once per day after games finish
                 global _milestones_checked_today
-                goat_enabled = config.get("alerts", {}).get("goat_tracker", {}).get("enabled", True)
                 today_str = datetime.now().strftime("%Y-%m-%d")
 
-                if goat_enabled and final and not live and _milestones_checked_today != today_str:
+                any_goat_enabled = any(
+                    uc["config"].get("alerts", {}).get("goat_tracker", {}).get("enabled", True)
+                    for uc in get_all_user_configs()
+                ) if get_all_user_configs() else True
+
+                if any_goat_enabled and final and not live and _milestones_checked_today != today_str:
                     _milestones_checked_today = today_str
                     logger.info("Running GOAT Tracker milestone check...")
                     try:
@@ -351,12 +361,10 @@ async def _poll_loop() -> None:
                                 "priority": ma["priority"],
                                 "time": datetime.now().strftime("%H:%M:%S"),
                             }
-                            if webapp_enabled:
-                                with alert_lock:
-                                    alert_history.append(alert_dict)
-                                _broadcast_alert(alert_dict)
+                            with alert_lock:
+                                alert_history.append(alert_dict)
+                            _broadcast_alert(alert_dict)
 
-                            # Send through external notifiers too
                             alert_obj = Alert(
                                 rule_name="goat_tracker",
                                 game_id="milestone",
@@ -365,11 +373,7 @@ async def _poll_loop() -> None:
                                 priority=ma["priority"],
                                 dedup_key=("milestone", ma["stat"], ma["record_holder"]),
                             )
-                            for n in notifiers:
-                                try:
-                                    await n.send(alert_obj)
-                                except Exception:
-                                    logger.warning("Notifier %s failed for milestone", type(n).__name__)
+                            await _notify_users(alert_obj, "", "")
                     except Exception:
                         logger.exception("GOAT Tracker check failed")
 
@@ -1767,12 +1771,6 @@ def save():
 
     save_config(config)
 
-    # Restart monitor if running so it picks up new config
-    if monitor_running:
-        stop_monitor()
-        time.sleep(1)
-        start_monitor()
-
     return redirect(url_for("index", saved="1"))
 
 
@@ -1835,7 +1833,7 @@ def find_open_port(start: int = 5050, end: int = 5100) -> int:
 
 
 def main():
-    import os
+    init_db()
     port = int(os.environ.get("PORT", 0)) or find_open_port()
     start_monitor()
     print(f"\n  Open http://localhost:{port} to configure notifications\n")
