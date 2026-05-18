@@ -1278,7 +1278,7 @@ TEMPLATE = """
                             <input type="number" name="close_game_threshold" min="1" max="20"
                                 value="{{ alerts_cfg.close_game.get('point_threshold', 5) }}">
                             <label>Time left &le;</label>
-                            <input type="number" name="close_game_minutes" min="1" max="12" step="0.5"
+                            <input type="number" name="close_game_minutes" min="1" max="12" step="1"
                                 value="{{ alerts_cfg.close_game.get('minutes_remaining', 4) }}">
                             <span>min</span>
                         </div>
@@ -1820,7 +1820,7 @@ def save():
             "close_game": {
                 "enabled": "close_game_enabled" in form,
                 "point_threshold": int(form.get("close_game_threshold", 5)),
-                "minutes_remaining": float(form.get("close_game_minutes", 4)),
+                "minutes_remaining": int(form.get("close_game_minutes", 4)),
                 "quarters": [4, 5, 6, 7],
             },
             "historic_scoring": {
