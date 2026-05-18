@@ -1435,15 +1435,6 @@ TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Polling -->
-            <div class="card">
-                <h2><span class="icon">&#9201;</span> Polling Interval</h2>
-                <div class="polling-input">
-                    <input type="number" name="polling_interval" min="10" max="120"
-                        value="{{ config.get('polling_interval_seconds', 30) }}">
-                    <span>seconds</span>
-                </div>
-            </div>
 
             <button type="submit" class="btn-save">Save Configuration</button>
         </form>
@@ -1823,7 +1814,7 @@ def save():
     teams_filter = [] if all_teams else form.getlist("teams")
 
     config = {
-        "polling_interval_seconds": max(10, int(form.get("polling_interval", 30))),
+        "polling_interval_seconds": 30,
         "teams_filter": teams_filter,
         "alerts": {
             "close_game": {
