@@ -5,6 +5,7 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  DB_PATH = "/data/courtside.db"
 
 [http_service]
   internal_port = 8080
@@ -17,3 +18,7 @@ primary_region = "iad"
   memory = "256mb"
   cpu_kind = "shared"
   cpus = 1
+
+[mounts]
+  source = "courtside_data"
+  destination = "/data"
