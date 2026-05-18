@@ -1279,7 +1279,7 @@ TEMPLATE = """
                                 value="{{ alerts_cfg.close_game.get('point_threshold', 5) }}">
                             <label>Time left &le;</label>
                             <input type="number" name="close_game_minutes" min="1" max="12" step="1"
-                                value="{{ alerts_cfg.close_game.get('minutes_remaining', 4) }}">
+                                value="{{ alerts_cfg.close_game.get('minutes_remaining', 4) | int }}">
                             <span>min</span>
                         </div>
                     </div>
