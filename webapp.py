@@ -1373,7 +1373,7 @@ TEMPLATE = """
                     </label>
                 </div>
 
-                <div class="channel-row">
+                {# <div class="channel-row">
                     <div class="channel-info">
                         <span class="channel-name">Console</span>
                         <span class="channel-desc">Print alerts to the terminal</span>
@@ -1383,7 +1383,7 @@ TEMPLATE = """
                             {{ 'checked' if notif.get('console', {}).get('enabled', true) }}>
                         <span class="slider"></span>
                     </label>
-                </div>
+                </div> #}
 
                 <div class="channel-row">
                     <div class="channel-info">
