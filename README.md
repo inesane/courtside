@@ -54,7 +54,7 @@ Currently tracking **LeBron James**:
 - Games played (Robert Parish's record)
 - Points (45,000 career milestone)
 - Assists (Jason Kidd, Chris Paul)
-- Rebounds (Tim Duncan)
+- Rebounds (Tim Duncan) 
 - Steals (Gary Payton, Michael Jordan, Jason Kidd)
 - Three-pointers (Klay Thompson, Ray Allen)
 - Free throws (Karl Malone's record)
@@ -114,6 +114,34 @@ The ESPN API uses the same URL pattern across sports. To add a new league (e.g.,
 1. Create `sports/nfl/provider.py` — swap `basketball/nba` for `football/nfl`
 2. Create `alerts/nfl/rules.py` — define sport-specific alert rules
 3. Register in `webapp.py`
+
+## Deployment (Fly.io)
+
+The app includes a Dockerfile and `fly.toml` for deploying to [Fly.io](https://fly.io) (free tier with credit card for verification).
+
+```bash
+# Install the Fly CLI
+curl -L https://fly.io/install.sh | sh
+
+# Log in (opens browser)
+fly auth login
+
+# Launch the app (detects fly.toml + Dockerfile automatically)
+fly launch
+
+# Deploy
+fly deploy
+
+# Open your app in the browser
+fly open
+```
+
+For future updates, just run `fly deploy` again.
+
+Useful commands:
+- `fly logs` — live logs (monitor output, errors)
+- `fly status` — check if the app is running
+- `fly ssh console` — SSH into the container
 
 ## Data Source
 
