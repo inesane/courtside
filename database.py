@@ -25,6 +25,9 @@ def init_db() -> None:
         c.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
+                google_id TEXT UNIQUE,
+                email TEXT,
+                name TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS user_configs (
@@ -33,18 +36,31 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
         """)
+        # Migrate existing DBs that predate google_id/email/name columns
+        existing = {row[1] for row in c.execute("PRAGMA table_info(users)")}
+        for col, definition in [
+            ("google_id", "TEXT UNIQUE"),
+            ("email", "TEXT"),
+            ("name", "TEXT"),
+        ]:
+            if col not in existing:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
 
 
-def get_or_create_user(user_id: str | None) -> str:
+def get_or_create_google_user(google_id: str, email: str, name: str) -> str:
+    """Look up a user by Google ID, creating one if this is their first login."""
     with _connect() as c:
-        if user_id:
-            row = c.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
-            if row:
-                return str(row["id"])
+        row = c.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
+        if row:
+            c.execute(
+                "UPDATE users SET email = ?, name = ? WHERE google_id = ?",
+                (email, name, google_id),
+            )
+            return str(row["id"])
         new_id = str(uuid.uuid4())
         c.execute(
-            "INSERT INTO users (id, created_at) VALUES (?, ?)",
-            (new_id, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO users (id, google_id, email, name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (new_id, google_id, email, name, datetime.now(timezone.utc).isoformat()),
         )
         return new_id
 

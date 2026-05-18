@@ -16,8 +16,9 @@ from queue import Queue
 from typing import Any
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from authlib.integrations.flask_client import OAuth
 
-from database import get_all_user_configs, get_or_create_user, init_db, load_user_config, save_user_config
+from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
@@ -48,17 +49,32 @@ logger = logging.getLogger("webapp")
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
+oauth = OAuth(app)
+oauth.register(
+    name="google",
+    client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email profile"},
+)
+
+_PUBLIC_ROUTES = {"login", "auth_google", "auth_google_callback", "static"}
+
 
 @app.before_request
-def _ensure_user_session() -> None:
-    session["user_id"] = get_or_create_user(session.get("user_id"))
+def _require_login() -> None:
+    if request.endpoint in _PUBLIC_ROUTES:
+        return
+    if "user_id" not in session:
+        return redirect(url_for("login"))
 
 # ---------------------------------------------------------------------------
 # Shared state for the background monitor
 # ---------------------------------------------------------------------------
-alert_history: list[dict[str, Any]] = []
+# Per-user alert history and SSE clients, keyed by user_id
+alert_history: "dict[str, list[dict[str, Any]]]" = {}
 alert_lock = threading.Lock()
-sse_clients: list[Queue] = []
+sse_clients: "dict[str, list[Queue]]" = {}
 sse_lock = threading.Lock()
 monitor_thread: threading.Thread | None = None
 monitor_running = False
@@ -120,28 +136,31 @@ def save_config(config: dict[str, Any], user_id: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Monitor background thread
 # ---------------------------------------------------------------------------
-def _broadcast_alert(alert_dict: dict[str, Any]) -> None:
+def _push_to_user(user_id: str, data: dict[str, Any]) -> None:
     with sse_lock:
+        queues = sse_clients.get(user_id, [])
         dead: list[Queue] = []
-        for q in sse_clients:
+        for q in queues:
             try:
-                q.put_nowait(alert_dict)
+                q.put_nowait(data)
             except Exception:
                 dead.append(q)
         for q in dead:
-            sse_clients.remove(q)
+            queues.remove(q)
 
 
 def _broadcast_status(status: dict[str, Any]) -> None:
+    """Push monitor status update to all connected users."""
     with sse_lock:
-        dead: list[Queue] = []
-        for q in sse_clients:
-            try:
-                q.put_nowait({"_type": "status", **status})
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            sse_clients.remove(q)
+        for queues in sse_clients.values():
+            dead: list[Queue] = []
+            for q in queues:
+                try:
+                    q.put_nowait({"_type": "status", **status})
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                queues.remove(q)
 
 
 def build_rules(config: dict, engine: AlertEngine) -> list[AlertRule]:
@@ -262,20 +281,49 @@ def _serialize_games(games) -> list[dict[str, Any]]:
     return serialized
 
 
+def _user_wants_alert(cfg: dict[str, Any], alert: Alert, home_abbrev: str, away_abbrev: str) -> bool:
+    """Return True if this user's config means they should receive this alert."""
+    user_filter = set(cfg.get("teams_filter", []))
+    if user_filter and home_abbrev and not (
+        home_abbrev in user_filter or away_abbrev in user_filter
+    ):
+        return False
+    rule_cfg = cfg.get("alerts", {}).get(alert.rule_name, {})
+    if not rule_cfg.get("enabled", True):
+        return False
+    return True
+
+
 async def _notify_users(alert: Alert, home_abbrev: str, away_abbrev: str) -> None:
-    """Send alert to every user whose teams filter and notification config match."""
+    """Send alert to every user whose teams filter and alert rules match."""
+    now_str = datetime.now().strftime("%H:%M:%S")
     for uc in get_all_user_configs():
+        user_id = uc["user_id"]
         cfg = uc["config"]
-        user_filter = set(cfg.get("teams_filter", []))
-        if user_filter and home_abbrev and not (
-            home_abbrev in user_filter or away_abbrev in user_filter
-        ):
+        if not _user_wants_alert(cfg, alert, home_abbrev, away_abbrev):
             continue
+
+        # In-app SSE push
+        alert_dict = {
+            "_type": "alert",
+            "rule": alert.rule_name,
+            "headline": alert.headline,
+            "detail": alert.detail,
+            "priority": alert.priority,
+            "time": now_str,
+        }
+        with alert_lock:
+            user_alerts = alert_history.setdefault(user_id, [])
+            alert_dict["id"] = len(user_alerts)
+            user_alerts.append(alert_dict)
+        _push_to_user(user_id, alert_dict)
+
+        # External notifications (Discord, Telegram, etc.)
         for n in build_notifiers(cfg):
             try:
                 await n.send(alert)
             except Exception:
-                logger.warning("Notifier %s failed for user %s", type(n).__name__, uc["user_id"])
+                logger.warning("Notifier %s failed for user %s", type(n).__name__, user_id)
 
 
 async def _poll_loop() -> None:
@@ -319,19 +367,6 @@ async def _poll_loop() -> None:
 
                     fired = engine.evaluate(game)
                     for a in fired:
-                        alert_dict = {
-                            "_type": "alert",
-                            "id": len(alert_history),
-                            "rule": a.rule_name,
-                            "headline": a.headline,
-                            "detail": a.detail,
-                            "priority": a.priority,
-                            "time": datetime.now().strftime("%H:%M:%S"),
-                        }
-                        with alert_lock:
-                            alert_history.append(alert_dict)
-                        _broadcast_alert(alert_dict)
-
                         await _notify_users(a, game.home_abbrev, game.away_abbrev)
 
                 for game in final:
@@ -352,19 +387,6 @@ async def _poll_loop() -> None:
                     try:
                         milestone_alerts = await run_milestone_check()
                         for ma in milestone_alerts:
-                            alert_dict = {
-                                "_type": "alert",
-                                "id": len(alert_history),
-                                "rule": "goat_tracker",
-                                "headline": ma["headline"],
-                                "detail": ma["detail"],
-                                "priority": ma["priority"],
-                                "time": datetime.now().strftime("%H:%M:%S"),
-                            }
-                            with alert_lock:
-                                alert_history.append(alert_dict)
-                            _broadcast_alert(alert_dict)
-
                             alert_obj = Alert(
                                 rule_name="goat_tracker",
                                 game_id="milestone",
@@ -1130,6 +1152,8 @@ TEMPLATE = """
                 <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
                 <span class="notif-badge {{ 'hidden' if not alert_count }}" id="notif-count">{{ alert_count }}</span>
             </button>
+            <span style="font-size:13px; color:#8b949e;">{{ user_name }}</span>
+            <a href="/logout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px;">Sign out</a>
         </div>
     </div>
 
@@ -1678,6 +1702,78 @@ TEMPLATE = """
 
 
 # ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+LOGIN_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — Sports Notifications</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: #0f1117; color: #e1e4e8; min-height: 100vh;
+       display: flex; align-items: center; justify-content: center; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+        padding: 48px 40px; text-align: center; max-width: 360px; width: 100%; }
+h1 { font-size: 24px; margin-bottom: 8px; }
+p { color: #8b949e; font-size: 14px; margin-bottom: 32px; }
+.btn-google { display: inline-flex; align-items: center; gap: 12px;
+              background: #fff; color: #1f1f1f; border: none; border-radius: 8px;
+              padding: 12px 24px; font-size: 15px; font-weight: 500;
+              cursor: pointer; text-decoration: none; transition: background 0.2s; }
+.btn-google:hover { background: #f0f0f0; }
+.btn-google svg { width: 20px; height: 20px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Sports Notifications</h1>
+  <p>Sign in to configure your alerts and receive notifications on Discord or Telegram.</p>
+  <a href="/auth/google" class="btn-google">
+    <svg viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.2l6.8-6.8C35.8 2.2 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.4 13 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.5 2.8-2.2 5.2-4.7 6.8l7.3 5.7c4.3-4 6.8-9.9 6.8-16.5z"/><path fill="#FBBC05" d="M10.6 28.6A14.6 14.6 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6l-7.9-6.1A23.9 23.9 0 0 0 0 24c0 3.9.9 7.5 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.2 0 11.4-2 15.2-5.5l-7.3-5.7c-2 1.4-4.6 2.2-7.9 2.2-6.2 0-11.5-4.2-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>
+    Sign in with Google
+  </a>
+</div>
+</body>
+</html>"""
+
+
+@app.route("/login")
+def login():
+    if "user_id" in session:
+        return redirect(url_for("index"))
+    return render_template_string(LOGIN_TEMPLATE)
+
+
+@app.route("/auth/google")
+def auth_google():
+    redirect_uri = url_for("auth_google_callback", _external=True)
+    return oauth.google.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/google/callback")
+def auth_google_callback():
+    token = oauth.google.authorize_access_token()
+    userinfo = token.get("userinfo") or oauth.google.userinfo()
+    google_id = userinfo["sub"]
+    email = userinfo.get("email", "")
+    name = userinfo.get("name", email)
+    user_id = get_or_create_google_user(google_id, email, name)
+    session["user_id"] = user_id
+    session["user_name"] = name
+    session["user_email"] = email
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
@@ -1690,8 +1786,9 @@ def index():
 
     selected_teams = set(config.get("teams_filter", []))
 
+    user_id = session.get("user_id", "")
     with alert_lock:
-        alerts_snapshot = list(alert_history)
+        alerts_snapshot = list(alert_history.get(user_id, []))
 
     with games_lock:
         games_snapshot = list(games_data)
@@ -1714,6 +1811,7 @@ def index():
         monitor_running=monitor_running,
         monitor_status=monitor_status,
         games_list=games_snapshot,
+        user_name=session.get("user_name", session.get("user_email", "Account")),
     )
 
 
@@ -1788,25 +1886,29 @@ def api_stop_monitor():
 
 @app.route("/api/alerts/clear", methods=["POST"])
 def api_clear_alerts():
+    user_id = session.get("user_id", "")
     with alert_lock:
-        alert_history.clear()
+        alert_history.pop(user_id, None)
     return jsonify({"ok": True})
 
 
 @app.route("/api/alerts/stream")
 def api_alert_stream():
+    user_id = session.get("user_id", "")
+
     def stream():
         q: Queue = Queue()
         with sse_lock:
-            sse_clients.append(q)
+            sse_clients.setdefault(user_id, []).append(q)
         try:
             while True:
                 data = q.get()
                 yield f"data: {json.dumps(data)}\n\n"
         except GeneratorExit:
             with sse_lock:
-                if q in sse_clients:
-                    sse_clients.remove(q)
+                queues = sse_clients.get(user_id, [])
+                if q in queues:
+                    queues.remove(q)
 
     return Response(stream(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
