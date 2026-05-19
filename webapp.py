@@ -1554,7 +1554,7 @@ TEMPLATE = """
                 <div class="channel-row">
                     <div class="channel-info">
                         <span class="channel-name">Push Notifications</span>
-                        <span class="channel-desc">Native alerts on this device — works on phone and desktop</span>
+                        <span class="channel-desc">Native alerts — works on Android and desktop</span>
                     </div>
                     <div class="channel-actions">
                         <button type="button" class="btn-test" id="push-test-btn" onclick="testNotification('push')">Test</button>
