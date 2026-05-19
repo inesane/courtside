@@ -39,6 +39,14 @@ def init_db() -> None:
                 alert_key TEXT PRIMARY KEY,
                 sent_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
         """)
         # Migrate existing DBs that predate google_id/email/name columns
         existing = {row[1] for row in c.execute("PRAGMA table_info(users)")}
@@ -86,6 +94,38 @@ def save_user_config(user_id: str, config: dict[str, Any]) -> None:
                    updated_at = excluded.updated_at""",
             (user_id, json.dumps(config), datetime.now(timezone.utc).isoformat()),
         )
+
+
+def save_push_subscription(user_id: str, endpoint: str, p256dh: str, auth: str) -> None:
+    with _connect() as c:
+        c.execute(
+            """INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(endpoint) DO UPDATE SET
+                   user_id = excluded.user_id,
+                   p256dh = excluded.p256dh,
+                   auth = excluded.auth""",
+            (user_id, endpoint, p256dh, auth, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def delete_push_subscription(endpoint: str) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+
+
+def get_push_subscriptions_for_user(user_id: str) -> list[dict]:
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        return [{"endpoint": r["endpoint"], "keys": {"p256dh": r["p256dh"], "auth": r["auth"]}} for r in rows]
+
+
+def get_all_push_subscriptions() -> list[dict]:
+    with _connect() as c:
+        rows = c.execute("SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+        return [{"user_id": r["user_id"], "endpoint": r["endpoint"], "keys": {"p256dh": r["p256dh"], "auth": r["auth"]}} for r in rows]
 
 
 def milestone_already_sent(alert_key: str) -> bool:

@@ -18,7 +18,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 from authlib.integrations.flask_client import OAuth
 
-from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config, milestone_already_sent, mark_milestone_sent
+from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config, milestone_already_sent, mark_milestone_sent, save_push_subscription, delete_push_subscription, get_push_subscriptions_for_user, get_all_push_subscriptions
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
@@ -58,7 +58,11 @@ oauth.register(
     client_kwargs={"scope": "openid email profile"},
 )
 
-_PUBLIC_ROUTES = {"login", "auth_google", "auth_google_callback", "static"}
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_CLAIMS = {"sub": "mailto:admin@courtside.app"}
+
+_PUBLIC_ROUTES = {"login", "auth_google", "auth_google_callback", "static", "manifest_json", "service_worker"}
 
 
 @app.before_request
@@ -340,6 +344,32 @@ async def _notify_users(alert: Alert, home_abbrev: str, away_abbrev: str) -> Non
             except Exception:
                 logger.warning("Notifier %s failed for user %s", type(n).__name__, user_id)
 
+        # Web push
+        if VAPID_PRIVATE_KEY:
+            _send_web_push_to_user(user_id, alert)
+
+
+def _send_web_push_to_user(user_id: str, alert: Alert) -> None:
+    from pywebpush import webpush, WebPushException
+    subscriptions = get_push_subscriptions_for_user(user_id)
+    payload = json.dumps({"headline": alert.headline, "detail": alert.detail, "priority": alert.priority})
+    for sub in subscriptions:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims=VAPID_CLAIMS,
+            )
+        except WebPushException as e:
+            if e.response is not None and e.response.status_code == 410:
+                # Subscription expired — remove it
+                delete_push_subscription(sub["endpoint"])
+            else:
+                logger.warning("Web push failed for user %s: %s", user_id, e)
+        except Exception as e:
+            logger.warning("Web push failed for user %s: %s", user_id, e)
+
 
 def _build_permissive_rules(engine: AlertEngine) -> list[AlertRule]:
     """Build rules using the most permissive thresholds across all user configs.
@@ -530,6 +560,11 @@ TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Courtside</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#161b22">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Courtside">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1515,6 +1550,16 @@ TEMPLATE = """
                     </label>
                 </div>
 
+                <div class="channel-row">
+                    <div class="channel-info">
+                        <span class="channel-name">Push Notifications</span>
+                        <span class="channel-desc">Native alerts on this device — works on phone and desktop</span>
+                    </div>
+                    <button type="button" class="btn-test" id="push-btn" onclick="togglePushSubscription()" style="white-space:nowrap; padding: 6px 14px; font-size: 12px;">
+                        Enable
+                    </button>
+                </div>
+
                 {# <div class="channel-row">
                     <div class="channel-info">
                         <span class="channel-name">Console</span>
@@ -1625,6 +1670,78 @@ TEMPLATE = """
     <div class="toast" id="toast">Configuration saved!</div>
 
     <script>
+        // ---- PWA / Web Push ----
+        let swRegistration = null;
+        let pushSubscription = null;
+
+        async function initPush() {
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+            try {
+                swRegistration = await navigator.serviceWorker.register('/sw.js');
+                pushSubscription = await swRegistration.pushManager.getSubscription();
+                updatePushButton();
+            } catch(e) { console.warn('SW registration failed:', e); }
+        }
+
+        function updatePushButton() {
+            const btn = document.getElementById('push-btn');
+            if (!btn) return;
+            if (pushSubscription) {
+                btn.textContent = 'Enabled ✓';
+                btn.style.color = '#3fb950';
+                btn.style.borderColor = '#3fb950';
+            } else {
+                btn.textContent = 'Enable';
+                btn.style.color = '';
+                btn.style.borderColor = '';
+            }
+        }
+
+        async function togglePushSubscription() {
+            if (!swRegistration) return;
+            const btn = document.getElementById('push-btn');
+            btn.textContent = '...';
+            btn.disabled = true;
+            try {
+                if (pushSubscription) {
+                    await fetch('/api/push/unsubscribe', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({endpoint: pushSubscription.endpoint})
+                    });
+                    await pushSubscription.unsubscribe();
+                    pushSubscription = null;
+                } else {
+                    const keyResp = await fetch('/api/push/vapid-public-key');
+                    const { key } = await keyResp.json();
+                    const applicationServerKey = urlBase64ToUint8Array(key);
+                    pushSubscription = await swRegistration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey
+                    });
+                    await fetch('/api/push/subscribe', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(pushSubscription.toJSON())
+                    });
+                }
+            } catch(e) {
+                console.error('Push toggle failed:', e);
+                btn.textContent = 'Failed';
+            }
+            btn.disabled = false;
+            updatePushButton();
+        }
+
+        function urlBase64ToUint8Array(base64String) {
+            const padding = '='.repeat((4 - base64String.length % 4) % 4);
+            const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+            const rawData = atob(base64);
+            return new Uint8Array([...rawData].map(c => c.charCodeAt(0)));
+        }
+
+        window.addEventListener('load', initPush);
+
         // ---- Test notifications ----
         async function testNotification(channel) {
             const btn = document.getElementById(channel + '-test-btn');
@@ -1894,6 +2011,83 @@ TEMPLATE = """
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# PWA routes (manifest + service worker)
+# ---------------------------------------------------------------------------
+@app.route("/manifest.json")
+def manifest_json():
+    return jsonify({
+        "name": "Courtside",
+        "short_name": "Courtside",
+        "description": "Live sports alerts for NBA, NFL, Soccer and more",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0f1117",
+        "theme_color": "#161b22",
+        "icons": [
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        ],
+    })
+
+
+@app.route("/sw.js")
+def service_worker():
+    sw = """
+self.addEventListener('push', event => {
+    const data = event.data ? event.data.json() : {};
+    const title = data.headline || 'Courtside Alert';
+    const options = {
+        body: data.detail || '',
+        icon: '/static/icon-192.png',
+        badge: '/static/icon-192.png',
+        vibrate: [200, 100, 200],
+        data: { url: '/' },
+        requireInteraction: data.priority === 'high',
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    event.waitUntil(clients.openWindow(event.notification.data.url || '/'));
+});
+"""
+    return Response(sw, mimetype="application/javascript",
+                    headers={"Service-Worker-Allowed": "/"})
+
+
+# ---------------------------------------------------------------------------
+# Push subscription routes
+# ---------------------------------------------------------------------------
+@app.route("/api/push/subscribe", methods=["POST"])
+def api_push_subscribe():
+    user_id = session.get("user_id", "")
+    data = request.json
+    try:
+        save_push_subscription(
+            user_id=user_id,
+            endpoint=data["endpoint"],
+            p256dh=data["keys"]["p256dh"],
+            auth=data["keys"]["auth"],
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+def api_push_unsubscribe():
+    data = request.json
+    delete_push_subscription(data["endpoint"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/push/vapid-public-key")
+def api_vapid_public_key():
+    return jsonify({"key": VAPID_PUBLIC_KEY})
 
 
 # ---------------------------------------------------------------------------
