@@ -649,6 +649,41 @@ TEMPLATE = """
             color: #8b949e;
         }
 
+        @media (max-width: 600px) {
+            .header {
+                padding: 10px 16px;
+                flex-wrap: nowrap;
+                gap: 8px;
+            }
+            .header h1 {
+                font-size: 16px;
+            }
+            .header-left {
+                gap: 8px;
+                min-width: 0;
+            }
+            .header-right {
+                gap: 8px;
+                flex-shrink: 0;
+            }
+            .status-text {
+                display: none;
+            }
+            .monitor-badge {
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+            .user-name-label {
+                display: none;
+            }
+            .main-content {
+                padding: 16px;
+            }
+            .card {
+                padding: 16px;
+            }
+        }
+
         .notif-bell {
             position: relative;
             background: none;
@@ -1330,8 +1365,8 @@ TEMPLATE = """
                 <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
                 <span class="notif-badge {{ 'hidden' if not alert_count }}" id="notif-count">{{ alert_count }}</span>
             </button>
-            <span style="font-size:13px; color:#8b949e;">{{ user_name }}</span>
-            <a href="/logout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px;">Sign out</a>
+            <span class="user-name-label" style="font-size:13px; color:#8b949e;">{{ user_name }}</span>
+            <a href="/logout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px; white-space:nowrap;">Sign out</a>
         </div>
     </div>
 
