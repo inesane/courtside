@@ -649,39 +649,90 @@ TEMPLATE = """
             color: #8b949e;
         }
 
+        .user-menu {
+            position: relative;
+        }
+
+        .user-icon-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #e1e4e8;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .user-icon-btn:hover { background: #30363d; }
+        .user-icon-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
+        .user-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 40px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 12px 16px;
+            min-width: 200px;
+            z-index: 100;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+
+        .user-dropdown.open { display: block; }
+
+        .user-dropdown .ud-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: #e1e4e8;
+            margin-bottom: 2px;
+        }
+
+        .user-dropdown .ud-email {
+            font-size: 12px;
+            color: #8b949e;
+            margin-bottom: 12px;
+            word-break: break-all;
+        }
+
+        .user-dropdown .ud-signout {
+            display: block;
+            font-size: 13px;
+            color: #f85149;
+            text-decoration: none;
+            padding: 6px 0;
+            border-top: 1px solid #30363d;
+        }
+
         @media (max-width: 600px) {
             .header {
                 padding: 10px 16px;
                 flex-wrap: nowrap;
                 gap: 8px;
             }
-            .header h1 {
-                font-size: 16px;
-            }
-            .header-left {
+            .header h1 { font-size: 16px; }
+            .header-left { gap: 8px; min-width: 0; }
+            .header-right { gap: 8px; flex-shrink: 0; }
+            .status-text { display: none; }
+            .monitor-badge { padding: 4px 8px; font-size: 11px; }
+            .user-name-label { display: none; }
+            .desktop-signout { display: none; }
+            .main-content { padding: 16px; }
+            .card { padding: 16px; }
+            .settings-row {
+                flex-wrap: wrap;
                 gap: 8px;
-                min-width: 0;
             }
-            .header-right {
-                gap: 8px;
-                flex-shrink: 0;
-            }
-            .status-text {
-                display: none;
-            }
-            .monitor-badge {
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-            .user-name-label {
-                display: none;
-            }
-            .main-content {
-                padding: 16px;
-            }
-            .card {
-                padding: 16px;
-            }
+            .settings-row label { white-space: normal; }
+        }
+
+        @media (min-width: 601px) {
+            .user-icon-btn { display: none; }
         }
 
         .notif-bell {
@@ -1366,7 +1417,17 @@ TEMPLATE = """
                 <span class="notif-badge {{ 'hidden' if not alert_count }}" id="notif-count">{{ alert_count }}</span>
             </button>
             <span class="user-name-label" style="font-size:13px; color:#8b949e;">{{ user_name }}</span>
-            <a href="/logout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px; white-space:nowrap;">Sign out</a>
+            <a href="/logout" class="desktop-signout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px; white-space:nowrap;">Sign out</a>
+            <div class="user-menu">
+                <button class="user-icon-btn" onclick="toggleUserMenu()" type="button">
+                    <svg viewBox="0 0 24 24"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+                </button>
+                <div class="user-dropdown" id="user-dropdown">
+                    <div class="ud-name">{{ user_name }}</div>
+                    <div class="ud-email">{{ user_email }}</div>
+                    <a href="/logout" class="ud-signout">Sign out</a>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1709,6 +1770,17 @@ TEMPLATE = """
     <div class="toast" id="toast">Configuration saved!</div>
 
     <script>
+        // ---- User menu ----
+        function toggleUserMenu() {
+            document.getElementById('user-dropdown').classList.toggle('open');
+        }
+        document.addEventListener('click', e => {
+            const menu = document.querySelector('.user-menu');
+            if (menu && !menu.contains(e.target)) {
+                document.getElementById('user-dropdown').classList.remove('open');
+            }
+        });
+
         // ---- PWA / Web Push ----
         let swRegistration = null;
         let pushSubscription = null;
@@ -2247,6 +2319,7 @@ def index():
         monitor_status=monitor_status,
         games_list=games_snapshot,
         user_name=session.get("user_name", session.get("user_email", "Account")),
+        user_email=session.get("user_email", ""),
     )
 
 
