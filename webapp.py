@@ -1556,9 +1556,12 @@ TEMPLATE = """
                         <span class="channel-name">Push Notifications</span>
                         <span class="channel-desc">Native alerts on this device — works on phone and desktop</span>
                     </div>
-                    <button type="button" class="btn-test" id="push-btn" onclick="togglePushSubscription()" style="white-space:nowrap; padding: 6px 14px; font-size: 12px;">
-                        Enable
-                    </button>
+                    <div class="channel-actions">
+                        <button type="button" class="btn-test" id="push-test-btn" onclick="testNotification('push')">Test</button>
+                        <button type="button" class="btn-test" id="push-btn" onclick="togglePushSubscription()" style="padding: 3px 12px;">
+                            Enable
+                        </button>
+                    </div>
                 </div>
 
                 {# <div class="channel-row">
@@ -1699,7 +1702,14 @@ TEMPLATE = """
         }
 
         async function togglePushSubscription() {
-            if (!swRegistration) return;
+            if (!swRegistration) {
+                // Try registering again if it failed on load
+                await initPush();
+                if (!swRegistration) {
+                    alert('Push notifications are not supported in this browser.');
+                    return;
+                }
+            }
             const btn = document.getElementById('push-btn');
             btn.textContent = '...';
             btn.disabled = true;
@@ -2335,6 +2345,11 @@ def api_notify_test():
                 return jsonify({"ok": False, "error": "Bot token or chat ID missing"})
             import asyncio
             asyncio.run(TelegramNotifier(tg_cfg["bot_token"], tg_cfg["chat_id"]).send(test_alert))
+        elif channel == "push":
+            user_id = session.get("user_id", "")
+            if not VAPID_PRIVATE_KEY:
+                return jsonify({"ok": False, "error": "VAPID keys not configured on server"})
+            _send_web_push_to_user(user_id, test_alert)
         else:
             return jsonify({"ok": False, "error": "Unknown channel"})
         return jsonify({"ok": True})
