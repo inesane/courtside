@@ -1527,7 +1527,7 @@ TEMPLATE = """
                     </label>
                 </div> #}
 
-                <div class="channel-row">
+                {# <div class="channel-row">
                     <div class="channel-info">
                         <span class="channel-name">Desktop Notifications</span>
                         <span class="channel-desc">OS-level push notifications</span>
@@ -1537,7 +1537,7 @@ TEMPLATE = """
                             {{ 'checked' if notif.get('desktop', {}).get('enabled', false) }}>
                         <span class="slider"></span>
                     </label>
-                </div>
+                </div> #}
 
                 <div class="channel-row" style="flex-wrap: wrap;">
                     <div class="channel-info" style="flex: 1;">
