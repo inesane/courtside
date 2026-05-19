@@ -1,8 +1,12 @@
 # Courtside
 
-**Live app: [courtside.fly.dev](https://courtside.fly.dev)**
-
 Missed Bam's 83? Real-time sports notification system that alerts you when games get exciting — close finishes, historic performances, overtime, and more. Currently supports the NBA with a plugin architecture for adding other leagues.
+
+## Live App
+
+You can use the app directly here hosted using Fly.io (no setup required):
+
+https://courtside.fly.dev
 
 ## Features
 
