@@ -1679,12 +1679,23 @@ TEMPLATE = """
         let pushSubscription = null;
 
         async function initPush() {
-            if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+            if (!('serviceWorker' in navigator)) {
+                console.warn('Service workers not supported');
+                return;
+            }
+            if (!('PushManager' in window)) {
+                console.warn('PushManager not supported');
+                return;
+            }
             try {
                 swRegistration = await navigator.serviceWorker.register('/sw.js');
+                await navigator.serviceWorker.ready;
                 pushSubscription = await swRegistration.pushManager.getSubscription();
                 updatePushButton();
-            } catch(e) { console.warn('SW registration failed:', e); }
+            } catch(e) {
+                console.warn('SW registration failed:', e);
+                swRegistration = null;
+            }
         }
 
         function updatePushButton() {
@@ -1702,11 +1713,18 @@ TEMPLATE = """
         }
 
         async function togglePushSubscription() {
+            if (!('serviceWorker' in navigator)) {
+                alert('Service workers are not supported in this browser.');
+                return;
+            }
+            if (!('PushManager' in window)) {
+                alert('Push notifications are not supported in this browser.');
+                return;
+            }
             if (!swRegistration) {
-                // Try registering again if it failed on load
                 await initPush();
                 if (!swRegistration) {
-                    alert('Push notifications are not supported in this browser.');
+                    alert('Could not register service worker. Make sure you are on HTTPS and try again.');
                     return;
                 }
             }
