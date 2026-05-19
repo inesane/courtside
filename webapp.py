@@ -654,21 +654,23 @@ TEMPLATE = """
         }
 
         .user-icon-btn {
-            width: 32px;
             height: 32px;
-            border-radius: 50%;
+            border-radius: 20px;
             background: #21262d;
             border: 1px solid #30363d;
             color: #e1e4e8;
             cursor: pointer;
             display: flex;
             align-items: center;
-            justify-content: center;
+            gap: 6px;
+            padding: 0 10px;
             flex-shrink: 0;
+            font-size: 13px;
         }
 
         .user-icon-btn:hover { background: #30363d; }
-        .user-icon-btn svg { width: 16px; height: 16px; fill: currentColor; }
+        .user-icon-btn svg { width: 16px; height: 16px; fill: currentColor; flex-shrink: 0; }
+        .user-name-label { white-space: nowrap; }
 
         .user-dropdown {
             display: none;
@@ -721,7 +723,7 @@ TEMPLATE = """
             .status-text { display: none; }
             .monitor-badge { padding: 4px 8px; font-size: 11px; }
             .user-name-label { display: none; }
-            .desktop-signout { display: none; }
+            .user-icon-btn { width: 32px; height: 32px; border-radius: 50%; padding: 0; justify-content: center; }
             .main-content { padding: 16px; }
             .card { padding: 16px; }
             .settings-row {
@@ -731,9 +733,6 @@ TEMPLATE = """
             .settings-row label { white-space: normal; }
         }
 
-        @media (min-width: 601px) {
-            .user-icon-btn { display: none; }
-        }
 
         .notif-bell {
             position: relative;
@@ -1416,10 +1415,9 @@ TEMPLATE = """
                 <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
                 <span class="notif-badge {{ 'hidden' if not alert_count }}" id="notif-count">{{ alert_count }}</span>
             </button>
-            <span class="user-name-label" style="font-size:13px; color:#8b949e;">{{ user_name }}</span>
-            <a href="/logout" class="desktop-signout" style="font-size:12px; color:#8b949e; text-decoration:none; padding:4px 10px; border:1px solid #30363d; border-radius:6px; white-space:nowrap;">Sign out</a>
             <div class="user-menu">
                 <button class="user-icon-btn" onclick="toggleUserMenu()" type="button">
+                    <span class="user-name-label">{{ user_name }}</span>
                     <svg viewBox="0 0 24 24"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
                 </button>
                 <div class="user-dropdown" id="user-dropdown">
