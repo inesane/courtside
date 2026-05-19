@@ -18,7 +18,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 from authlib.integrations.flask_client import OAuth
 
-from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config, milestone_already_sent, mark_milestone_sent, save_push_subscription, delete_push_subscription, get_push_subscriptions_for_user, get_all_push_subscriptions
+from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config, milestone_already_sent, mark_milestone_sent, save_push_subscription, delete_push_subscription, get_push_subscriptions_for_user, get_all_push_subscriptions, clear_all_push_subscriptions
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
@@ -2374,6 +2374,9 @@ def find_open_port(start: int = 5050, end: int = 5100) -> int:
 
 def main():
     init_db()
+    # Clear stale push subscriptions on startup — users re-subscribe with current VAPID keys
+    if VAPID_PRIVATE_KEY:
+        clear_all_push_subscriptions()
     port = int(os.environ.get("PORT", 0)) or find_open_port()
     start_monitor()
     print(f"\n  Open http://localhost:{port} to configure notifications\n")

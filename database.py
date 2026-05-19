@@ -114,6 +114,11 @@ def delete_push_subscription(endpoint: str) -> None:
         c.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
 
 
+def clear_all_push_subscriptions() -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM push_subscriptions")
+
+
 def get_push_subscriptions_for_user(user_id: str) -> list[dict]:
     with _connect() as c:
         rows = c.execute(
