@@ -67,9 +67,10 @@ _PUBLIC_ROUTES = {"login", "auth_google", "auth_google_callback", "static", "man
 
 @app.before_request
 def _require_login() -> None:
+    if request.endpoint in _PUBLIC_ROUTES:
+        return
     if "user_id" not in session:
-        session["user_id"] = "local-dev-user"
-        session["user_name"] = "Local Dev"
+        return redirect(url_for("login"))
 
 # ---------------------------------------------------------------------------
 # Shared state for the background monitor
