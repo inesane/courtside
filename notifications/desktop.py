@@ -22,4 +22,4 @@ class DesktopNotifier(Notifier):
                 timeout=10,
             )
         except Exception:
-            logger.warning("Desktop notification failed", exc_info=True)
+            logger.debug("Desktop notification failed (no display available)")

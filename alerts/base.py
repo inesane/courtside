@@ -17,6 +17,11 @@ class Alert:
     detail: str
     priority: str  # "high", "medium", "low"
     dedup_key: tuple  # Used to prevent sending the same alert twice
+    metadata: dict = None  # Optional rule-specific values for per-user threshold filtering
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
 
 
 class AlertRule(ABC):

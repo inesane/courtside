@@ -29,7 +29,6 @@ class CloseGameRule(AlertRule):
         if game.score_diff > self.point_threshold:
             return []
 
-        # Only alert when time remaining is within the configured threshold
         time_left = game.clock_seconds
         if time_left > self.minutes_remaining * 60:
             return []
@@ -45,6 +44,7 @@ class CloseGameRule(AlertRule):
             detail=f"{game.detail} — {game.score_diff} point game with {mins}:{secs:02d} left!",
             priority=priority,
             dedup_key=(game.game_id, self.name, game.period),
+            metadata={"score_diff": game.score_diff, "time_left_seconds": time_left},
         )]
 
 
@@ -74,6 +74,7 @@ class HistoricScoringRule(AlertRule):
                     detail=f"{game.score_line()} | {game.detail} — {player.player_name} ({player.team}) is on fire!",
                     priority="high",
                     dedup_key=(game.game_id, self.name, player.player_name, self.points_threshold),
+                    metadata={"points": pts, "player": player.player_name},
                 ))
 
         return alerts
@@ -159,20 +160,54 @@ class OvertimeRule(AlertRule):
     name = "overtime"
 
     def evaluate(self, game: GameState, prev_game: Optional[GameState]) -> list[Alert]:
-        if game.status != "in_progress":
-            return []
-        if game.period <= 4:
-            return []
+        alerts: list[Alert] = []
 
-        ot_number = game.period - 4
-        return [Alert(
-            rule_name=self.name,
-            game_id=game.game_id,
-            headline=f"OVERTIME: {game.score_line()}",
-            detail=f"OT{ot_number} — {game.detail}",
-            priority="medium",
-            dedup_key=(game.game_id, self.name, game.period),
-        )]
+        # Detect the moment regulation ends tied — fires when period transitions 4 → 5
+        if (
+            prev_game is not None
+            and prev_game.period == 4
+            and game.period == 5
+            and game.score_diff == 0
+        ):
+            alerts.append(Alert(
+                rule_name=self.name,
+                game_id=game.game_id,
+                headline=f"TIED AT THE BUZZER: {game.score_line()}",
+                detail=f"Game is tied — heading to overtime!",
+                priority="high",
+                dedup_key=(game.game_id, self.name, "tied_to_ot"),
+            ))
+
+        # Fire when each OT period starts (period transition)
+        if (
+            prev_game is not None
+            and game.period > 4
+            and game.period != prev_game.period
+        ):
+            ot_number = game.period - 4
+            label = "Overtime" if ot_number == 1 else f"Double OT" if ot_number == 2 else f"OT{ot_number}"
+            alerts.append(Alert(
+                rule_name=self.name,
+                game_id=game.game_id,
+                headline=f"{label.upper()}: {game.score_line()}",
+                detail=f"{label} — {game.detail}",
+                priority="high",
+                dedup_key=(game.game_id, self.name, game.period),
+            ))
+        elif game.status == "in_progress" and game.period > 4:
+            # Fallback: if we missed the transition (e.g. app restarted), still fire once
+            ot_number = game.period - 4
+            label = "Overtime" if ot_number == 1 else "Double OT" if ot_number == 2 else f"OT{ot_number}"
+            alerts.append(Alert(
+                rule_name=self.name,
+                game_id=game.game_id,
+                headline=f"{label.upper()}: {game.score_line()}",
+                detail=f"{label} — {game.detail}",
+                priority="high",
+                dedup_key=(game.game_id, self.name, game.period),
+            ))
+
+        return alerts
 
 
 def _get_stat(stats: dict[str, Any], *keys: str) -> Optional[int]:

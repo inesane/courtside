@@ -287,9 +287,25 @@ def _user_wants_alert(cfg: dict[str, Any], alert: Alert, home_abbrev: str, away_
         home_abbrev in user_filter or away_abbrev in user_filter
     ):
         return False
+
     rule_cfg = cfg.get("alerts", {}).get(alert.rule_name, {})
     if not rule_cfg.get("enabled", True):
         return False
+
+    # Per-user threshold checks using alert metadata
+    meta = alert.metadata or {}
+    if alert.rule_name == "close_game":
+        user_threshold = rule_cfg.get("point_threshold", 5)
+        user_minutes = rule_cfg.get("minutes_remaining", 4)
+        if "score_diff" in meta and meta["score_diff"] > user_threshold:
+            return False
+        if "time_left_seconds" in meta and meta["time_left_seconds"] > user_minutes * 60:
+            return False
+    elif alert.rule_name == "historic_scoring":
+        user_pts = rule_cfg.get("points_threshold", 50)
+        if "points" in meta and meta["points"] < user_pts:
+            return False
+
     return True
 
 
@@ -325,6 +341,40 @@ async def _notify_users(alert: Alert, home_abbrev: str, away_abbrev: str) -> Non
                 logger.warning("Notifier %s failed for user %s", type(n).__name__, user_id)
 
 
+def _build_permissive_rules(engine: AlertEngine) -> list[AlertRule]:
+    """Build rules using the most permissive thresholds across all user configs.
+    This ensures the engine fires whenever *any* user would want an alert.
+    Per-user threshold filtering happens in _user_wants_alert."""
+    user_configs = get_all_user_configs()
+    if not user_configs:
+        return build_rules({}, engine)
+
+    # Most permissive = highest point_threshold, highest minutes_remaining, lowest points_threshold
+    max_point_threshold = max(
+        uc["config"].get("alerts", {}).get("close_game", {}).get("point_threshold", 5)
+        for uc in user_configs
+    )
+    max_minutes = max(
+        uc["config"].get("alerts", {}).get("close_game", {}).get("minutes_remaining", 4)
+        for uc in user_configs
+    )
+    min_scoring_threshold = min(
+        uc["config"].get("alerts", {}).get("historic_scoring", {}).get("points_threshold", 50)
+        for uc in user_configs
+    )
+
+    permissive_config = {
+        "alerts": {
+            "close_game": {"enabled": True, "point_threshold": max_point_threshold, "minutes_remaining": max_minutes, "quarters": [4, 5, 6, 7]},
+            "historic_scoring": {"enabled": True, "points_threshold": min_scoring_threshold},
+            "historic_stats": {"enabled": True},
+            "blowout_comeback": {"enabled": True, "deficit_threshold": 20, "close_threshold": 5},
+            "overtime": {"enabled": True},
+        }
+    }
+    return build_rules(permissive_config, engine)
+
+
 async def _poll_loop() -> None:
     global monitor_running, monitor_status
 
@@ -334,7 +384,7 @@ async def _poll_loop() -> None:
     provider = NBAProvider(espn)
 
     engine = AlertEngine(rules=[])
-    engine.rules = build_rules({}, engine)  # use rule defaults; thresholds per-user not yet applied
+    engine.rules = _build_permissive_rules(engine)
 
     logger.info("Monitor started | rules=%s", [r.name for r in engine.rules])
 
@@ -357,6 +407,9 @@ async def _poll_loop() -> None:
                     games_data.extend(serialized)
 
                 _broadcast_status({**monitor_status, "_games": serialized})
+
+                # Refresh rules each cycle so new users / config changes are picked up
+                engine.rules = _build_permissive_rules(engine)
 
                 for game in live:
                     try:
