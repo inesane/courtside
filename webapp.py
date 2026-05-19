@@ -2122,6 +2122,7 @@ TEMPLATE = """
         const toast = document.getElementById('toast');
         toast.classList.add('show');
         setTimeout(() => toast.classList.remove('show'), 3000);
+        history.replaceState(null, '', '/');
         {% endif %}
     </script>
 </body>
