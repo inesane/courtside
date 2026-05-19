@@ -35,6 +35,10 @@ def init_db() -> None:
                 config_json TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sent_milestone_alerts (
+                alert_key TEXT PRIMARY KEY,
+                sent_at TEXT NOT NULL
+            );
         """)
         # Migrate existing DBs that predate google_id/email/name columns
         existing = {row[1] for row in c.execute("PRAGMA table_info(users)")}
@@ -81,6 +85,20 @@ def save_user_config(user_id: str, config: dict[str, Any]) -> None:
                    config_json = excluded.config_json,
                    updated_at = excluded.updated_at""",
             (user_id, json.dumps(config), datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def milestone_already_sent(alert_key: str) -> bool:
+    with _connect() as c:
+        row = c.execute("SELECT 1 FROM sent_milestone_alerts WHERE alert_key = ?", (alert_key,)).fetchone()
+        return row is not None
+
+
+def mark_milestone_sent(alert_key: str) -> None:
+    with _connect() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO sent_milestone_alerts (alert_key, sent_at) VALUES (?, ?)",
+            (alert_key, datetime.now(timezone.utc).isoformat()),
         )
 
 

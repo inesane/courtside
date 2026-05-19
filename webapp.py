@@ -18,7 +18,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 from authlib.integrations.flask_client import OAuth
 
-from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config
+from database import get_all_user_configs, get_or_create_google_user, init_db, load_user_config, save_user_config, milestone_already_sent, mark_milestone_sent
 
 from alerts.base import Alert, AlertRule
 from alerts.engine import AlertEngine
@@ -439,6 +439,9 @@ async def _poll_loop() -> None:
                     try:
                         milestone_alerts = await run_milestone_check()
                         for ma in milestone_alerts:
+                            alert_key = f"{ma['stat']}:{ma['record_holder']}:{ma.get('current', '')}"
+                            if milestone_already_sent(alert_key):
+                                continue
                             alert_obj = Alert(
                                 rule_name="goat_tracker",
                                 game_id="milestone",
@@ -448,6 +451,7 @@ async def _poll_loop() -> None:
                                 dedup_key=("milestone", ma["stat"], ma["record_holder"]),
                             )
                             await _notify_users(alert_obj, "", "")
+                            mark_milestone_sent(alert_key)
                     except Exception:
                         logger.exception("GOAT Tracker check failed")
 
