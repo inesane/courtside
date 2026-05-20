@@ -75,11 +75,12 @@ def _require_login() -> None:
 # ---------------------------------------------------------------------------
 # Shared state for the background monitor
 # ---------------------------------------------------------------------------
-# Per-user alert history and SSE clients, keyed by user_id
+# Per-user alert history, SSE clients, and alert engines — all keyed by user_id
 alert_history: "dict[str, list[dict[str, Any]]]" = {}
 alert_lock = threading.Lock()
 sse_clients: "dict[str, list[Queue]]" = {}
 sse_lock = threading.Lock()
+user_engines: "dict[str, AlertEngine]" = {}
 monitor_thread: threading.Thread | None = None
 monitor_running = False
 monitor_status: dict[str, Any] = {"state": "stopped", "last_poll": None, "games": {}}
@@ -285,69 +286,37 @@ def _serialize_games(games) -> list[dict[str, Any]]:
     return serialized
 
 
-def _user_wants_alert(cfg: dict[str, Any], alert: Alert, home_abbrev: str, away_abbrev: str) -> bool:
-    """Return True if this user's config means they should receive this alert."""
-    user_filter = set(cfg.get("teams_filter", []))
-    if user_filter and home_abbrev and not (
-        home_abbrev in user_filter or away_abbrev in user_filter
-    ):
-        return False
-
-    rule_cfg = cfg.get("alerts", {}).get(alert.rule_name, {})
-    if not rule_cfg.get("enabled", True):
-        return False
-
-    # Per-user threshold checks using alert metadata
-    meta = alert.metadata or {}
-    if alert.rule_name == "close_game":
-        user_threshold = rule_cfg.get("point_threshold", 5)
-        user_minutes = rule_cfg.get("minutes_remaining", 4)
-        if "score_diff" in meta and meta["score_diff"] > user_threshold:
-            return False
-        if "time_left_seconds" in meta and meta["time_left_seconds"] > user_minutes * 60:
-            return False
-    elif alert.rule_name == "historic_scoring":
-        user_pts = rule_cfg.get("points_threshold", 50)
-        if "points" in meta and meta["points"] < user_pts:
-            return False
-
-    return True
+def _get_user_engine(user_id: str) -> AlertEngine:
+    if user_id not in user_engines:
+        user_engines[user_id] = AlertEngine(rules=[])
+    return user_engines[user_id]
 
 
-async def _notify_users(alert: Alert, home_abbrev: str, away_abbrev: str) -> None:
-    """Send alert to every user whose teams filter and alert rules match."""
+async def _send_to_user(user_id: str, cfg: dict[str, Any], alert: Alert) -> None:
+    """Deliver a fired alert to one user via all their configured channels."""
     now_str = datetime.now().strftime("%H:%M:%S")
-    for uc in get_all_user_configs():
-        user_id = uc["user_id"]
-        cfg = uc["config"]
-        if not _user_wants_alert(cfg, alert, home_abbrev, away_abbrev):
-            continue
+    alert_dict = {
+        "_type": "alert",
+        "rule": alert.rule_name,
+        "headline": alert.headline,
+        "detail": alert.detail,
+        "priority": alert.priority,
+        "time": now_str,
+    }
+    with alert_lock:
+        user_alerts = alert_history.setdefault(user_id, [])
+        alert_dict["id"] = len(user_alerts)
+        user_alerts.append(alert_dict)
+    _push_to_user(user_id, alert_dict)
 
-        # In-app SSE push
-        alert_dict = {
-            "_type": "alert",
-            "rule": alert.rule_name,
-            "headline": alert.headline,
-            "detail": alert.detail,
-            "priority": alert.priority,
-            "time": now_str,
-        }
-        with alert_lock:
-            user_alerts = alert_history.setdefault(user_id, [])
-            alert_dict["id"] = len(user_alerts)
-            user_alerts.append(alert_dict)
-        _push_to_user(user_id, alert_dict)
+    for n in build_notifiers(cfg):
+        try:
+            await n.send(alert)
+        except Exception:
+            logger.warning("Notifier %s failed for user %s", type(n).__name__, user_id)
 
-        # External notifications (Discord, Telegram, etc.)
-        for n in build_notifiers(cfg):
-            try:
-                await n.send(alert)
-            except Exception:
-                logger.warning("Notifier %s failed for user %s", type(n).__name__, user_id)
-
-        # Web push
-        if VAPID_PRIVATE_KEY:
-            _send_web_push_to_user(user_id, alert)
+    if VAPID_PRIVATE_KEY:
+        _send_web_push_to_user(user_id, alert)
 
 
 def _send_web_push_to_user(user_id: str, alert: Alert) -> None:
@@ -372,55 +341,15 @@ def _send_web_push_to_user(user_id: str, alert: Alert) -> None:
             logger.warning("Web push failed for user %s: %s", user_id, e)
 
 
-def _build_permissive_rules(engine: AlertEngine) -> list[AlertRule]:
-    """Build rules using the most permissive thresholds across all user configs.
-    This ensures the engine fires whenever *any* user would want an alert.
-    Per-user threshold filtering happens in _user_wants_alert."""
-    user_configs = get_all_user_configs()
-    if not user_configs:
-        return build_rules({}, engine)
-
-    # For point thresholds: most permissive = highest (catches everyone's range)
-    # For time thresholds: most permissive = LOWEST minutes (fires at the strictest
-    # user's threshold; users with looser thresholds still receive it — just slightly
-    # later than ideal — but critically the dedup key isn't burned before their window)
-    max_point_threshold = max(
-        uc["config"].get("alerts", {}).get("close_game", {}).get("point_threshold", 5)
-        for uc in user_configs
-    )
-    min_minutes = min(
-        uc["config"].get("alerts", {}).get("close_game", {}).get("minutes_remaining", 4)
-        for uc in user_configs
-    )
-    min_scoring_threshold = min(
-        uc["config"].get("alerts", {}).get("historic_scoring", {}).get("points_threshold", 50)
-        for uc in user_configs
-    )
-
-    permissive_config = {
-        "alerts": {
-            "close_game": {"enabled": True, "point_threshold": max_point_threshold, "minutes_remaining": min_minutes, "quarters": [4, 5, 6, 7]},
-            "historic_scoring": {"enabled": True, "points_threshold": min_scoring_threshold},
-            "historic_stats": {"enabled": True},
-            "blowout_comeback": {"enabled": True, "deficit_threshold": 20, "close_threshold": 5},
-            "overtime": {"enabled": True},
-        }
-    }
-    return build_rules(permissive_config, engine)
-
-
 async def _poll_loop() -> None:
     global monitor_running, monitor_status
 
-    polling_interval = 30  # fixed system default; users control notification routing
+    polling_interval = 30
 
     espn = ESPNClient()
     provider = NBAProvider(espn)
 
-    engine = AlertEngine(rules=[])
-    engine.rules = _build_permissive_rules(engine)
-
-    logger.info("Monitor started | rules=%s", [r.name for r in engine.rules])
+    logger.info("Monitor started — per-user alert engines")
 
     try:
         while monitor_running:
@@ -442,8 +371,7 @@ async def _poll_loop() -> None:
 
                 _broadcast_status({**monitor_status, "_games": serialized})
 
-                # Refresh rules each cycle so new users / config changes are picked up
-                engine.rules = _build_permissive_rules(engine)
+                user_configs = get_all_user_configs()
 
                 for game in live:
                     try:
@@ -451,12 +379,26 @@ async def _poll_loop() -> None:
                     except Exception:
                         logger.warning("Box score fetch failed for %s", game.game_id)
 
-                    fired = engine.evaluate(game)
-                    for a in fired:
-                        await _notify_users(a, game.home_abbrev, game.away_abbrev)
+                    for uc in user_configs:
+                        user_id = uc["user_id"]
+                        cfg = uc["config"]
+
+                        # Teams filter — skip this game entirely for this user
+                        user_filter = set(cfg.get("teams_filter", []))
+                        if user_filter and not (
+                            game.home_abbrev in user_filter or game.away_abbrev in user_filter
+                        ):
+                            continue
+
+                        eng = _get_user_engine(user_id)
+                        eng.rules = build_rules(cfg, eng)
+                        fired = eng.evaluate(game)
+                        for a in fired:
+                            await _send_to_user(user_id, cfg, a)
 
                 for game in final:
-                    engine.evaluate(game)
+                    for eng in user_engines.values():
+                        eng.evaluate(game)
 
                 # GOAT Tracker: check milestones once per day after games finish
                 global _milestones_checked_today
@@ -464,8 +406,8 @@ async def _poll_loop() -> None:
 
                 any_goat_enabled = any(
                     uc["config"].get("alerts", {}).get("goat_tracker", {}).get("enabled", True)
-                    for uc in get_all_user_configs()
-                ) if get_all_user_configs() else True
+                    for uc in user_configs
+                ) if user_configs else True
 
                 if any_goat_enabled and final and not live and _milestones_checked_today != today_str:
                     _milestones_checked_today = today_str
@@ -484,7 +426,9 @@ async def _poll_loop() -> None:
                                 priority=ma["priority"],
                                 dedup_key=("milestone", ma["stat"], ma["record_holder"]),
                             )
-                            await _notify_users(alert_obj, "", "")
+                            for uc in user_configs:
+                                if uc["config"].get("alerts", {}).get("goat_tracker", {}).get("enabled", True):
+                                    await _send_to_user(uc["user_id"], uc["config"], alert_obj)
                             mark_milestone_sent(alert_key)
                     except Exception:
                         logger.exception("GOAT Tracker check failed")
