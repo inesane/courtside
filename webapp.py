@@ -380,12 +380,15 @@ def _build_permissive_rules(engine: AlertEngine) -> list[AlertRule]:
     if not user_configs:
         return build_rules({}, engine)
 
-    # Most permissive = highest point_threshold, highest minutes_remaining, lowest points_threshold
+    # For point thresholds: most permissive = highest (catches everyone's range)
+    # For time thresholds: most permissive = LOWEST minutes (fires at the strictest
+    # user's threshold; users with looser thresholds still receive it — just slightly
+    # later than ideal — but critically the dedup key isn't burned before their window)
     max_point_threshold = max(
         uc["config"].get("alerts", {}).get("close_game", {}).get("point_threshold", 5)
         for uc in user_configs
     )
-    max_minutes = max(
+    min_minutes = min(
         uc["config"].get("alerts", {}).get("close_game", {}).get("minutes_remaining", 4)
         for uc in user_configs
     )
@@ -396,7 +399,7 @@ def _build_permissive_rules(engine: AlertEngine) -> list[AlertRule]:
 
     permissive_config = {
         "alerts": {
-            "close_game": {"enabled": True, "point_threshold": max_point_threshold, "minutes_remaining": max_minutes, "quarters": [4, 5, 6, 7]},
+            "close_game": {"enabled": True, "point_threshold": max_point_threshold, "minutes_remaining": min_minutes, "quarters": [4, 5, 6, 7]},
             "historic_scoring": {"enabled": True, "points_threshold": min_scoring_threshold},
             "historic_stats": {"enabled": True},
             "blowout_comeback": {"enabled": True, "deficit_threshold": 20, "close_threshold": 5},
