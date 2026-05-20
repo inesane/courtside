@@ -1,154 +1,113 @@
 # Courtside
 
-Missed Bam's 83? Real-time sports notification system that alerts you when games get exciting — close finishes, historic performances, overtime, and more. Currently supports the NBA with a plugin architecture for adding other leagues.
+Real-time sports notification system that alerts you when games get exciting — close finishes, historic performances, overtime, comeback alerts, and career milestones. Sign in with Google, configure your alerts, and get notified via Discord, Telegram, or browser push.
 
 ## Live App
 
-You can use the app directly here hosted using Fly.io (no setup required):
-
-https://courtside.fly.dev
+**[courtside.fly.dev](https://courtside.fly.dev)** — hosted on Fly.io, no setup required. Sign in with Google to get started.
 
 ## Features
 
-- **Live scoreboard** — see all today's games with real-time scores in the web UI
-- **Smart alerts** — get notified for close games, historic scoring, big stat lines, overtime
-- **GOAT Tracker** — track career milestones for all-time greats (e.g. LeBron approaching records)
-- **Multiple channels** — in-app bell, Discord, Telegram, desktop notifications, console
-- **Configurable** — toggle each alert type, set thresholds, filter by team
-- **Smart polling** — sleeps when no games are on, wakes up before tipoff, polls every 30s during live games
-- **Web UI** — configure everything and see notifications from one page
+- **Live scoreboard** — all today's games with real-time scores in the web UI
+- **Smart alerts** — close games, historic scoring, big stat lines, overtime, comebacks
+- **GOAT Tracker** — career milestone alerts for all-time greats
+- **Multiple notification channels** — in-app bell, Discord webhook, Telegram bot, browser push (Android/desktop)
+- **Per-user configuration** — each user has their own thresholds, team filters, and notification setup
+- **Smart polling** — sleeps when no games are on, wakes before tipoff, polls every 30s during live games
+- **Multi-user** — anyone can sign in with Google and get independent alerts based on their own config
 
-## Quick Start
+## Quick Start (local)
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Copy the example config
-cp config.example.yaml config.yaml
-
-# Start the web UI
 python3 webapp.py
 ```
 
-Open the URL shown in the terminal (e.g., `http://localhost:5050`) to:
-1. Pick your teams
-2. Toggle which notifications you want
-3. Set up Discord/Telegram if desired
-4. Click the monitor badge to start watching games
+Open the URL shown in the terminal. The local version skips Google OAuth — configure alerts and start monitoring directly.
 
 ## Alert Types
 
 | Alert | What it detects | Default threshold |
 |-------|----------------|-------------------|
-| Close Game | Tight score in the 4th quarter / OT | Within 5 pts, last 4 min |
-| Historic Scoring | Player hits a massive point total | 50+ pts |
-| Historic Stats | Huge rebounding, assist, steal, or block numbers | 25+ reb, 18+ ast, 7+ stl, 8+ blk |
+| Close Game | Tight score in 4th quarter / OT | Within 5 pts, last 4 min |
+| Historic Scoring | Player on a big scoring night | 50+ pts |
+| Historic Stats | Huge rebounding, assists, steals, blocks | 25+ reb, 18+ ast, 7+ stl, 8+ blk |
 | Blowout Comeback | Team erasing a big deficit | Was down 20+, now within 5 |
-| Overtime | Game goes to OT | Any OT |
-| GOAT Tracker | Career milestones approaching or broken | Configurable per-milestone |
+| Overtime | Game goes to OT | Any OT — alerts at tipoff and "Tied at the Buzzer" |
+| GOAT Tracker | Career milestones approaching or broken | Per-milestone |
 
-All thresholds are configurable in the web UI.
-
-## GOAT Tracker
-
-Tracks career milestones for players approaching all-time records. Checks once per day after all games go final and alerts when a player is closing in on a milestone.
-
-Uses per-game averages from ESPN to determine if a record could realistically be broken in the next game — no spam, only alerts when it matters.
-
-Currently tracking **LeBron James**:
-- Games played (Robert Parish's record)
-- Points (45,000 career milestone)
-- Assists (Jason Kidd, Chris Paul)
-- Rebounds (Tim Duncan) 
-- Steals (Gary Payton, Michael Jordan, Jason Kidd)
-- Three-pointers (Klay Thompson, Ray Allen)
-- Free throws (Karl Malone's record)
-
-Player milestones are defined in `milestones.json`. To track additional players, add their ESPN ID and the milestones you want to watch.
+All thresholds are configurable per user in the web UI.
 
 ## Notification Channels
 
-- **In-App (Bell)** — notifications appear in the bell icon panel in the web UI
-- **Console** — colored output in the terminal
-- **Desktop** — OS-level push notifications via `plyer`
-- **Discord** — send to a channel via webhook URL
-- **Telegram** — send via Bot API (token + chat ID)
+| Channel | Platform | Notes |
+|---------|----------|-------|
+| In-App Bell | All | Notifications in the web UI |
+| Discord | All | Webhook URL |
+| Telegram | All | Bot token + chat ID — recommended for iPhone |
+| Browser Push | Android, Desktop | PWA push notifications |
+
+> **iPhone users:** Use Telegram. Browser push notifications are blocked by Apple's push service for PWAs.
+
+## GOAT Tracker
+
+Checks career milestones once per day after all games go final. Uses per-game averages from ESPN to determine if a record could realistically be broken next game — no spam. Sent milestones are stored in the database and never re-sent, even after restarts.
+
+Currently tracking **LeBron James** across points, assists, rebounds, steals, three-pointers, free throws, and games played.
+
+Add more players by editing `milestones.json` with their ESPN ID and the milestones to watch.
 
 ## Smart Polling
 
-The monitor minimizes API calls based on game state:
-
-| State | Polling interval |
-|-------|-----------------|
-| Games are live | Every 30 seconds |
+| State | Interval |
+|-------|----------|
+| Games live | Every 30 seconds |
 | Games scheduled, hours away | Sleeps until 5 min before tipoff |
 | All games finished / no games today | Checks back every 30 minutes |
+
+ESPN's API updates roughly every 30-60 seconds during live games, so total latency from event to notification is typically 30-90 seconds.
+
+## Architecture
+
+Each user gets their own independent `AlertEngine` with their own rules (built from their saved config), their own deduplication state, and their own game state tracking. The poll loop evaluates every user independently every 30 seconds — no shared state between users.
 
 ## Project Structure
 
 ```
-├── webapp.py              # Web UI + built-in monitor
-├── main.py                # Standalone CLI monitor (optional)
-├── config.py              # Config loader
-├── config.example.yaml    # Example configuration
-├── requirements.txt
-├── sports/
-│   ├── base.py            # GameState, PlayerStats, SportProvider
-│   ├── espn.py            # ESPN API client (shared across sports)
-│   └── nba/
-│       └── provider.py    # NBA game + box score parsing
+├── webapp.py              # Web UI + monitor (main entrypoint)
+├── database.py            # SQLite — users, configs, push subscriptions, milestones
 ├── alerts/
-│   ├── base.py            # Alert, AlertRule
-│   ├── engine.py          # Alert engine with deduplication
-│   ├── milestones.py      # GOAT Tracker milestone checker
-│   └── nba/
-│       └── rules.py       # NBA-specific alert rules
+│   ├── engine.py          # AlertEngine with per-game deduplication
+│   ├── milestones.py      # GOAT Tracker
+│   └── nba/rules.py       # NBA alert rules
+├── sports/
+│   ├── espn.py            # ESPN API client
+│   └── nba/provider.py    # NBA scoreboard + box score parsing
+├── notifications/         # Discord, Telegram, desktop, console notifiers
 ├── milestones.json        # Player milestone definitions
-└── notifications/
-    ├── base.py            # Notifier base class
-    ├── console.py         # Terminal output
-    ├── desktop.py         # OS notifications
-    ├── discord.py         # Discord webhook
-    └── telegram.py        # Telegram bot
+├── Dockerfile
+└── fly.toml               # Fly.io deployment config
 ```
-
-## Adding Other Sports
-
-The ESPN API uses the same URL pattern across sports. To add a new league (e.g., NFL):
-
-1. Create `sports/nfl/provider.py` — swap `basketball/nba` for `football/nfl`
-2. Create `alerts/nfl/rules.py` — define sport-specific alert rules
-3. Register in `webapp.py`
 
 ## Deployment (Fly.io)
 
-The app includes a Dockerfile and `fly.toml` for deploying to [Fly.io](https://fly.io) (free tier with credit card for verification).
-
 ```bash
-# Install the Fly CLI
 curl -L https://fly.io/install.sh | sh
-
-# Log in (opens browser)
 fly auth login
-
-# Launch the app (detects fly.toml + Dockerfile automatically)
-fly launch
-
-# Deploy
+fly launch          # detects fly.toml + Dockerfile automatically
+fly volumes create courtside_data --region iad --size 1
+fly secrets set SECRET_KEY="..." GOOGLE_CLIENT_ID="..." GOOGLE_CLIENT_SECRET="..."
+fly secrets set VAPID_PRIVATE_KEY="..." VAPID_PUBLIC_KEY="..."
 fly deploy
-
-# Open your app in the browser
-fly open
 ```
 
-For future updates, just run `fly deploy` again.
-
 Useful commands:
-- `fly logs` — live logs (monitor output, errors)
-- `fly status` — check if the app is running
-- `fly ssh console` — SSH into the container
+```bash
+fly logs            # live logs
+fly ssh console     # SSH into the container
+fly status          # check app health
+```
 
 ## Data Source
 
-Uses ESPN's public scoreboard and summary APIs. No API key required.
+ESPN's public scoreboard and summary APIs. No API key required.
