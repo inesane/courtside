@@ -294,7 +294,7 @@ def _get_user_engine(user_id: str) -> AlertEngine:
 
 async def _send_to_user(user_id: str, cfg: dict[str, Any], alert: Alert) -> None:
     """Deliver a fired alert to one user via all their configured channels."""
-    now_str = datetime.now().strftime("%H:%M:%S")
+    now_str = datetime.now(timezone.utc).isoformat()
     alert_dict = {
         "_type": "alert",
         "rule": alert.rule_name,
@@ -359,7 +359,7 @@ async def _poll_loop() -> None:
                 scheduled = [g for g in games if g.status == "scheduled"]
                 final = [g for g in games if g.status == "final"]
 
-                monitor_status["last_poll"] = datetime.now().strftime("%H:%M:%S")
+                monitor_status["last_poll"] = datetime.now(timezone.utc).isoformat()
                 monitor_status["games"] = {
                     "live": len(live), "scheduled": len(scheduled), "final": len(final),
                 }
@@ -456,8 +456,8 @@ async def _poll_loop() -> None:
                         sleep_secs = polling_interval
                 else:
                     # All games final or no games today — check back every 30 min
-                    idle_interval = 1800
-                    logger.info("No upcoming games. Checking again in 30 minutes.")
+                    idle_interval = 300
+                    logger.info("No upcoming games. Checking again in 5 minutes.")
                     monitor_status["state"] = "idle (no upcoming games)"
                     _broadcast_status(monitor_status)
                     sleep_secs = idle_interval
@@ -1353,7 +1353,7 @@ TEMPLATE = """
         <div class="header-right">
             <span class="status-text" id="status-text">
                 {% if monitor_running and monitor_status.last_poll %}
-                    Last poll: {{ monitor_status.last_poll }} |
+                    Last poll: <span id="last-poll-time" data-utc="{{ monitor_status.last_poll }}">{{ monitor_status.last_poll }}</span> |
                     {{ monitor_status.games.live or 0 }} live,
                     {{ monitor_status.games.scheduled or 0 }} scheduled
                 {% endif %}
@@ -1401,7 +1401,7 @@ TEMPLATE = """
                 <div class="notif-header">
                     <span class="notif-priority {{ a.priority }}"></span>
                     <span class="notif-headline">{{ a.headline }}</span>
-                    <span class="notif-time">{{ a.time }}</span>
+                    <span class="notif-time" data-utc="{{ a.time }}">{{ a.time }}</span>
                 </div>
                 <div class="notif-detail">{{ a.detail }}</div>
                 <span class="notif-rule">{{ a.rule }}</span>
@@ -1715,6 +1715,18 @@ TEMPLATE = """
     <div class="toast" id="toast">Configuration saved!</div>
 
     <script>
+        // ---- Local time helper ----
+        function fmtLocalTime(isoStr) {
+            if (!isoStr) return '';
+            try {
+                return new Date(isoStr).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+            } catch(e) { return isoStr; }
+        }
+        // Convert any pre-rendered UTC timestamps on page load
+        document.querySelectorAll('[data-utc]').forEach(el => {
+            el.textContent = fmtLocalTime(el.dataset.utc);
+        });
+
         // ---- User menu ----
         function toggleUserMenu() {
             document.getElementById('user-dropdown').classList.toggle('open');
@@ -1861,7 +1873,7 @@ TEMPLATE = """
                 <div class="notif-header">
                     <span class="notif-priority ${data.priority}"></span>
                     <span class="notif-headline">${escapeHtml(data.headline)}</span>
-                    <span class="notif-time">${data.time}</span>
+                    <span class="notif-time">${fmtLocalTime(data.time)}</span>
                 </div>
                 <div class="notif-detail">${escapeHtml(data.detail)}</div>
                 <span class="notif-rule">${data.rule}</span>
@@ -1999,7 +2011,7 @@ TEMPLATE = """
                     // Update status bar
                     let text = '';
                     if (data.last_poll) {
-                        text = `Last poll: ${data.last_poll}`;
+                        text = `Last poll: ${fmtLocalTime(data.last_poll)}`;
                         if (data.games) {
                             text += ` | ${data.games.live || 0} live, ${data.games.scheduled || 0} scheduled`;
                         }
