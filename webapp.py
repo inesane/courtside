@@ -64,14 +64,6 @@ VAPID_CLAIMS = {"sub": "mailto:admin@courtside.app"}
 
 _PUBLIC_ROUTES = {"login", "auth_google", "auth_google_callback", "static", "manifest_json", "service_worker"}
 
-
-@app.before_request
-def _require_login() -> None:
-    if request.endpoint in _PUBLIC_ROUTES:
-        return
-    if "user_id" not in session:
-        return redirect(url_for("login"))
-
 # ---------------------------------------------------------------------------
 # Shared state for the background monitor
 # ---------------------------------------------------------------------------
@@ -1362,6 +1354,7 @@ TEMPLATE = """
                 <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
                 <span class="notif-badge {{ 'hidden' if not alert_count }}" id="notif-count">{{ alert_count }}</span>
             </button>
+            {% if logged_in %}
             <div class="user-menu">
                 <button class="user-icon-btn" onclick="toggleUserMenu()" type="button">
                     <span class="user-name-label">{{ user_name }}</span>
@@ -1373,6 +1366,12 @@ TEMPLATE = """
                     <a href="/logout" class="ud-signout">Sign out</a>
                 </div>
             </div>
+            {% else %}
+            <a href="/login" class="user-icon-btn" style="text-decoration:none;">
+                <svg viewBox="0 0 24 24"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+                <span class="user-name-label">Sign In</span>
+            </a>
+            {% endif %}
         </div>
     </div>
 
@@ -1460,6 +1459,15 @@ TEMPLATE = """
             </div>
         </div>
 
+        {% if not logged_in %}
+        <div class="card" style="text-align:center; padding: 32px 24px;">
+            <p style="color:#8b949e; margin-bottom:16px; font-size:15px;">Sign in to save your alert preferences and enable Discord, Telegram, and push notifications.</p>
+            <a href="/login" style="display:inline-flex; align-items:center; gap:10px; background:#4285F4; color:#fff; padding:10px 22px; border-radius:8px; text-decoration:none; font-weight:600; font-size:15px;">
+                <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#fff" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.2l6.8-6.8C35.8 2.2 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.4 13 17.8 9.5 24 9.5z"/><path fill="#fff" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.5 2.8-2.2 5.2-4.7 6.8l7.3 5.7c4.3-4 6.8-9.9 6.8-16.5z"/><path fill="#fff" d="M10.6 28.6A14.6 14.6 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6l-7.9-6.1A23.9 23.9 0 0 0 0 24c0 3.9.9 7.5 2.7 10.7l7.9-6.1z"/><path fill="#fff" d="M24 48c6.2 0 11.4-2 15.2-5.5l-7.3-5.7c-2 1.4-4.6 2.2-7.9 2.2-6.2 0-11.5-4.2-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>
+                Sign in with Google
+            </a>
+        </div>
+        {% else %}
         <form method="POST" action="/save" id="config-form">
 
             <!-- Teams -->
@@ -1678,6 +1686,7 @@ TEMPLATE = """
 
             <button type="submit" class="btn-save">Save Configuration</button>
         </form>
+        {% endif %}
     </div>
 
     <!-- Discord info modal -->
@@ -2140,6 +2149,8 @@ self.addEventListener('notificationclick', event => {
 # ---------------------------------------------------------------------------
 @app.route("/api/push/subscribe", methods=["POST"])
 def api_push_subscribe():
+    if "user_id" not in session:
+        return jsonify({"ok": False, "error": "Login required"}), 401
     user_id = session.get("user_id", "")
     data = request.json
     try:
@@ -2235,7 +2246,7 @@ def auth_google_callback():
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return redirect(url_for("index"))
 
 
 # ---------------------------------------------------------------------------
@@ -2262,6 +2273,7 @@ def index():
     status_order = {"in_progress": 0, "scheduled": 1, "final": 2}
     games_snapshot.sort(key=lambda g: status_order.get(g["status"], 1))
 
+    logged_in = "user_id" in session
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -2276,6 +2288,7 @@ def index():
         monitor_running=monitor_running,
         monitor_status=monitor_status,
         games_list=games_snapshot,
+        logged_in=logged_in,
         user_name=session.get("user_name", session.get("user_email", "Account")),
         user_email=session.get("user_email", ""),
     )
@@ -2283,6 +2296,8 @@ def index():
 
 @app.route("/save", methods=["POST"])
 def save():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
     form = request.form
 
     all_teams = "all_teams" in form
