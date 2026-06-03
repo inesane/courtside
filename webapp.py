@@ -1736,14 +1736,16 @@ TEMPLATE = """
         function fmtGameTime(isoStr) {
             if (!isoStr) return '';
             try {
-                const fmt = new Date(isoStr).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short'}).toUpperCase();
-                // If browser returns GMT+offset, fall back to IANA-derived abbreviation
-                if (fmt.includes('GMT')) {
-                    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                    const abbr = tz.split('/').pop().replace('_', ' ');
-                    return new Date(isoStr).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', hour12: true}).toUpperCase() + ' ' + abbr;
+                const d = new Date(isoStr);
+                const time = d.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', hour12: true}).toUpperCase();
+                // Try multiple locales to find one that returns a named abbreviation (not GMT+offset)
+                let tzAbbr = null;
+                for (const locale of ['en-US', 'en-IN', 'en-AU', 'en-GB', 'en-CA']) {
+                    const parts = new Intl.DateTimeFormat(locale, {timeZoneName: 'short'}).formatToParts(d);
+                    const tz = parts.find(p => p.type === 'timeZoneName')?.value;
+                    if (tz && !tz.startsWith('GMT')) { tzAbbr = tz; break; }
                 }
-                return fmt;
+                return time + (tzAbbr ? ' ' + tzAbbr : '');
             } catch(e) { return isoStr; }
         }
         // Convert scheduled game start times to local time on page load
