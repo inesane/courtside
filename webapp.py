@@ -257,11 +257,6 @@ def _local_game_time(iso_str: str) -> str | None:
 def _serialize_games(games) -> list[dict[str, Any]]:
     serialized = []
     for g in games:
-        detail = g.detail
-        if g.status == "scheduled" and g.start_time:
-            local_time = _local_game_time(g.start_time)
-            if local_time:
-                detail = local_time
         serialized.append({
             "game_id": g.game_id,
             "status": g.status,
@@ -273,7 +268,8 @@ def _serialize_games(games) -> list[dict[str, Any]]:
             "away_score": g.away_score,
             "period": g.period,
             "clock": g.clock,
-            "detail": detail,
+            "detail": g.detail,
+            "start_time": g.start_time if g.status == "scheduled" else None,
         })
     return serialized
 
@@ -1426,7 +1422,7 @@ TEMPLATE = """
                                 <span class="game-clock">{{ g.detail }}</span>
                             {% elif g.status == 'scheduled' %}
                                 <span class="game-status-tag scheduled">Scheduled</span>
-                                <span class="game-clock">{{ g.detail }}</span>
+                                <span class="game-clock" {% if g.start_time %}data-start-time="{{ g.start_time }}"{% endif %}>{{ g.detail }}</span>
                             {% else %}
                                 <span class="game-status-tag final">Final</span>
                                 <span class="game-clock">{{ g.detail }}</span>
@@ -1737,6 +1733,17 @@ TEMPLATE = """
             el.textContent = fmtLocalTime(el.dataset.utc);
         });
 
+        function fmtGameTime(isoStr) {
+            if (!isoStr) return '';
+            try {
+                return new Date(isoStr).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            } catch(e) { return isoStr; }
+        }
+        // Convert scheduled game start times to local time on page load
+        document.querySelectorAll('[data-start-time]').forEach(el => {
+            el.textContent = fmtGameTime(el.dataset.startTime);
+        });
+
         // ---- User menu ----
         function toggleUserMenu() {
             document.getElementById('user-dropdown').classList.toggle('open');
@@ -1952,7 +1959,7 @@ TEMPLATE = """
                 card.innerHTML = `
                     <div class="game-status-bar">
                         ${statusTag}
-                        <span class="game-clock">${escapeHtml(g.detail)}</span>
+                        <span class="game-clock">${isScheduled && g.start_time ? fmtGameTime(g.start_time) : escapeHtml(g.detail)}</span>
                     </div>
                     <div class="game-teams">
                         <div class="game-team-row ${awayClass}">
