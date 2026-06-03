@@ -1736,7 +1736,14 @@ TEMPLATE = """
         function fmtGameTime(isoStr) {
             if (!isoStr) return '';
             try {
-                return new Date(isoStr).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'shortGeneric'}).toUpperCase();
+                const fmt = new Date(isoStr).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short'}).toUpperCase();
+                // If browser returns GMT+offset, fall back to IANA-derived abbreviation
+                if (fmt.includes('GMT')) {
+                    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    const abbr = tz.split('/').pop().replace('_', ' ');
+                    return new Date(isoStr).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', hour12: true}).toUpperCase() + ' ' + abbr;
+                }
+                return fmt;
             } catch(e) { return isoStr; }
         }
         // Convert scheduled game start times to local time on page load
