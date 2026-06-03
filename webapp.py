@@ -1736,7 +1736,7 @@ TEMPLATE = """
         function fmtGameTime(isoStr) {
             if (!isoStr) return '';
             try {
-                return new Date(isoStr).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'shortGeneric'});
+                return new Date(isoStr).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'shortGeneric'}).toUpperCase();
             } catch(e) { return isoStr; }
         }
         // Convert scheduled game start times to local time on page load
